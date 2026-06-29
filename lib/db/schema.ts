@@ -5,6 +5,7 @@ import {
   integer,
   timestamp,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 export const companies = pgTable("companies", {
   id: serial("id").primaryKey(),
@@ -27,7 +28,7 @@ export const talentSearches = pgTable("talent_searches", {
   id: serial("id").primaryKey(),
   role: text("role").notNull(),
   location: text("location").notNull().default(""),
-  tiers: text("tiers").array().notNull().default([]),
+  tiers: text("tiers").array().notNull().default(sql`'{}'::text[]`),
   status: text("status").notNull().default("pending"),
   profilesFound: integer("profiles_found").notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
