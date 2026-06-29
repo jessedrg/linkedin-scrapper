@@ -297,9 +297,12 @@ export async function POST(req: NextRequest) {
         const toSave = ranked.slice(0, 500);
         for (const p of toSave) {
           try {
+            const fullName = p.name || p.title.split(" - ")[0] || "Unknown";
+            const firstname = fullName.trim().split(/\s+/)[0] ?? "";
             await db.insert(profiles).values({
               company: p.company || "Unknown",
-              name: p.name || p.title.split(" - ")[0] || "Unknown",
+              name: fullName,
+              firstname,
               title: p.title,
               linkedinUrl: p.linkedinUrl,
               sourceQuery: role,

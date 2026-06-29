@@ -40,6 +40,7 @@ export const profiles = pgTable("profiles", {
   searchId: integer("search_id"),
   company: text("company").notNull(),
   name: text("name").notNull(),
+  firstname: text("firstname").notNull().default(""),
   title: text("title"),
   linkedinUrl: text("linkedin_url").notNull().unique(),
   sourceQuery: text("source_query"),

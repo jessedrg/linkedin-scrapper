@@ -8,6 +8,7 @@ import { getCompanyTier, type CompanyTier } from "./companies";
 
 export interface ScoredProfile {
   name: string;
+  firstname: string;
   title: string;
   company: string;
   linkedinUrl: string;
@@ -203,8 +204,12 @@ export function scoreProfile(
     reasons.push("Clean profile URL: +2");
   }
 
+  const fullName = profile.title?.split(" - ")[0]?.split(" | ")[0] ?? "";
+  const firstname = fullName.trim().split(/\s+/)[0] ?? "";
+
   return {
-    name: profile.title?.split(" - ")[0]?.split(" | ")[0] ?? "",
+    name: fullName,
+    firstname,
     title: profile.title ?? "",
     company: profile.company,
     linkedinUrl: profile.linkedinUrl,

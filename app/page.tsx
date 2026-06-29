@@ -64,6 +64,7 @@ type CompanyTier = "S" | "A" | "B" | "Mega";
 
 interface TalentProfile {
   name: string;
+  firstname: string;
   title: string;
   company: string;
   linkedinUrl: string;
@@ -1117,9 +1118,9 @@ function TalentView() {
         {results.length > 0 && (
           <a
             href={`data:text/csv;charset=utf-8,${encodeURIComponent(
-              ["Rank,Name,Title,Company,Tier,Score,Location,LinkedIn"].concat(
+              ["Rank,Firstname,Name,Title,Company,Tier,Score,Location,LinkedIn"].concat(
                 filtered.map((p, i) =>
-                  [i+1, `"${p.name}"`, `"${p.title}"`, `"${p.company}"`, p.companyTier ?? "", p.score, `"${p.location}"`, p.linkedinUrl].join(",")
+                  [i+1, `"${p.firstname}"`, `"${p.name}"`, `"${p.title}"`, `"${p.company}"`, p.companyTier ?? "", p.score, `"${p.location}"`, p.linkedinUrl].join(",")
                 )
               ).join("\n")
             )}`}
@@ -1326,8 +1327,9 @@ function TalentView() {
 
           {/* Ranking table */}
           <div className="glass-card overflow-hidden">
-            <div className="grid grid-cols-[40px_1fr_auto_auto] items-center gap-0 border-b border-white/5 px-5 py-3 text-[10px] font-semibold uppercase tracking-wider text-white/25">
+            <div className="grid grid-cols-[40px_80px_1fr_auto_auto] items-center gap-0 border-b border-white/5 px-5 py-3 text-[10px] font-semibold uppercase tracking-wider text-white/25">
               <span>#</span>
+              <span>First</span>
               <span>Profile</span>
               <span className="text-right pr-6">Tier</span>
               <span className="text-right">Score</span>
@@ -1342,11 +1344,16 @@ function TalentView() {
                   <div key={p.linkedinUrl}>
                     <button
                       onClick={() => setExpandedIdx(isExpanded ? null : i)}
-                      className="w-full grid grid-cols-[40px_1fr_auto_auto] items-center gap-0 px-5 py-4 text-left hover:bg-white/[0.025] transition-colors group"
+                      className="w-full grid grid-cols-[40px_80px_1fr_auto_auto] items-center gap-0 px-5 py-4 text-left hover:bg-white/[0.025] transition-colors group"
                     >
                       {/* Rank */}
                       <span className={`text-sm font-bold tabular-nums ${rankColor}`}>
                         {rank <= 3 ? ["🥇","🥈","🥉"][rank-1] : rank}
+                      </span>
+
+                      {/* Firstname */}
+                      <span className="text-sm font-semibold text-white/70 truncate pr-2">
+                        {p.firstname || "—"}
                       </span>
 
                       {/* Profile info */}
