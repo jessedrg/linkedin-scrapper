@@ -185,26 +185,40 @@ export function normaliseRole(raw: string): { keywords: string[]; titles: string
 }
 
 /**
- * Hard filter — returns true ONLY if the profile title contains the searched role
- * or one of its known synonyms. Used to discard irrelevant Brave results before scoring.
- * This is the single most important quality gate in the pipeline.
+ * Title filter — returns true if the Brave result title plausibly matches
+ * the searched role. Intentionally permissive: we prefer false positives
+ * (which the scorer will rank low) over false negatives (missing good profiles).
+ *
+ * Matching strategy (any one is sufficient):
+ *   1. Any AI-generated synonym appears in the title
+ *   2. Any static exactPhrase or alias from normaliseRole appears in the title
+ *   3. At least 2 significant words from the role appear in the title
  */
 export function titleMatchesRole(
   rawTitle: string,
   role: string,
-  extraSynonyms: string[] = [],
+  aiSynonyms: string[] = [],
 ): boolean {
   const { exactPhrases, titles } = normaliseRole(role);
   const t = rawTitle.toLowerCase();
 
-  // Check all known phrases + any AI-generated synonyms passed in
-  const allPhrases = [
+  // 1. AI synonyms (most comprehensive)
+  if (aiSynonyms.length > 0 && aiSynonyms.some((s) => t.includes(s))) return true;
+
+  // 2. Static phrase / alias list
+  const staticPhrases = [
     ...exactPhrases.map((p) => p.toLowerCase()),
     ...titles.map((p) => p.toLowerCase()),
-    ...extraSynonyms.map((p) => p.toLowerCase()),
   ];
+  if (staticPhrases.some((phrase) => t.includes(phrase))) return true;
 
-  return allPhrases.some((phrase) => t.includes(phrase));
+  // 3. Multi-word overlap fallback — at least 2 significant words from the role
+  const roleWords = role.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+  const matchCount = roleWords.filter((w) => t.includes(w)).length;
+  if (roleWords.length >= 2 && matchCount >= 2) return true;
+  if (roleWords.length === 1 && matchCount >= 1) return true;
+
+  return false;
 }
 
 /** Extract company name from a Brave result title/snippet */

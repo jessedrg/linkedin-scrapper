@@ -237,9 +237,8 @@ export async function POST(req: NextRequest) {
         const tieredCos = getCompaniesByTier(tiers as CompanyTier[]);
         const companyNames = tieredCos.map((c) => c.name);
 
-        // Step 1: Ask the AI to generate ALL possible title synonyms for this role.
-        // These are used as a hard filter — any profile whose title doesn't match
-        // at least one synonym is discarded immediately, preventing irrelevant results.
+        // Step 1: Ask the AI to generate ALL possible LinkedIn title synonyms for this role.
+        // We expand synonyms BEFORE filtering so the hard filter is comprehensive.
         send({ type: "status", message: `Expanding role synonyms with AI...` });
         let aiSynonyms: string[] = [];
         try {
@@ -254,32 +253,33 @@ export async function POST(req: NextRequest) {
               messages: [
                 {
                   role: "system",
-                  content: `You are a LinkedIn recruiter. Given a job role, return ALL possible exact title variations that someone with that role uses on their LinkedIn profile.
-Return ONLY a JSON array of strings. No explanation. No extra text. Just the JSON array.
-Be comprehensive — include abbreviations, seniority prefixes (Senior/Staff/Lead/Principal), and slightly different phrasings people actually use on LinkedIn.`,
+                  content: `You are a LinkedIn recruiter expert. Given a job role, return every possible title variation a person with that role uses on their LinkedIn profile.
+Include: abbreviations, seniority prefixes (Senior/Sr/Staff/Lead/Principal/Head), alternate phrasings, and closely related roles that are essentially the same job.
+Return ONLY a flat JSON array of lowercase strings. No markdown, no explanation.`,
                 },
                 {
                   role: "user",
-                  content: `Role: "${role}"\n\nReturn all LinkedIn title variations as a JSON string array.`,
+                  content: `Role: "${role}"\n\nReturn JSON array of all LinkedIn title synonyms.`,
                 },
               ],
-              temperature: 0.3,
-              max_tokens: 500,
+              temperature: 0.2,
+              max_tokens: 600,
             }),
           });
           if (synRes.ok) {
             const synData = (await synRes.json()) as { choices: Array<{ message: { content: string } }> };
             const raw = synData.choices[0]?.message?.content?.trim() ?? "[]";
-            // Strip markdown code fences if present
             const clean = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "").trim();
             const parsed = JSON.parse(clean);
-            if (Array.isArray(parsed)) aiSynonyms = parsed.map(String).filter(Boolean);
+            if (Array.isArray(parsed)) {
+              aiSynonyms = parsed.map((s: unknown) => String(s).toLowerCase()).filter(Boolean);
+            }
           }
         } catch {
-          // Continue — static synonyms from normaliseRole() will still filter
+          // Continue — static synonyms from normaliseRole() will still be used
         }
 
-        send({ type: "status", message: `Generating queries for ${companyNames.length} companies (${tiers.join("/")})...` });
+        send({ type: "status", message: `Found ${aiSynonyms.length} synonyms. Generating queries for ${companyNames.length} companies...` });
 
         const queries = await generateTalentQueries({
           role,
@@ -288,7 +288,7 @@ Be comprehensive — include abbreviations, seniority prefixes (Senior/Staff/Lea
           totalQueries: queriesTotal,
         });
 
-        send({ type: "status", message: `Running ${queries.length} targeted searches...`, queriesTotal: queries.length });
+        send({ type: "status", message: `Running ${queries.length} searches...`, queriesTotal: queries.length });
 
         const allRaw: Array<{ title: string; company: string; linkedinUrl: string; snippet: string }> = [];
         const seenUrls = new Set<string>();
@@ -299,9 +299,10 @@ Be comprehensive — include abbreviations, seniority prefixes (Senior/Staff/Lea
 
           let results;
           try {
-            results = await searchBraveDeep(query, braveKey, { maxResults: maxResultsPerQuery, delayMs: 1100 });
+            // maxResults=20 per query — we rely on many queries, not deep pagination
+            results = await searchBraveDeep(query, braveKey, { maxResults: 20, delayMs: 650 });
           } catch {
-            await new Promise((r) => setTimeout(r, 3000));
+            await new Promise((r) => setTimeout(r, 2000));
             continue;
           }
 
@@ -310,15 +311,15 @@ Be comprehensive — include abbreviations, seniority prefixes (Senior/Staff/Lea
             if (seenUrls.has(url)) continue;
             seenUrls.add(url);
 
-            // HARD FILTER: discard any profile whose title doesn't match the role.
-            // This is the primary quality gate — eliminates irrelevant results before scoring.
+            // HARD FILTER: only keep profiles whose title matches the role or a synonym.
+            // Brave search already constrains by query, so this is a final sanity check.
             if (!titleMatchesRole(r.title, role, aiSynonyms)) continue;
 
             const company = extractCompanyFromResult(r.title, r.snippet);
             allRaw.push({ title: r.title, company, linkedinUrl: url, snippet: r.snippet });
           }
 
-          if (allRaw.length >= 2000) break;
+          if (allRaw.length >= 3000) break;
         }
 
         send({ type: "status", message: `Scoring ${allRaw.length} profiles...` });
