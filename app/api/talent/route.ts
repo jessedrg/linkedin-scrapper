@@ -252,10 +252,50 @@ export async function POST(req: NextRequest) {
 
         send({ type: "status", message: "Running " + queryList.length + " searches (" + companyNames.length + " companies)...", queriesTotal: queryList.length });
 
+        // ── Pre-fetch AI synonyms BEFORE the collection loop ──
+        // This lets us filter partials correctly during streaming, not just at the end.
+        send({ type: "status", message: "Expanding role synonyms..." });
+        let aiSynonyms: string[] = [];
+        try {
+          const synRes = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: "Bearer " + (process.env.AI_GATEWAY_API_KEY ?? ""),
+            },
+            body: JSON.stringify({
+              model: "gpt-4o-mini",
+              messages: [
+                {
+                  role: "system",
+                  content:
+                    "You are a LinkedIn recruiter expert. " +
+                    "Return every possible LinkedIn title variation for the given role — " +
+                    "abbreviations, seniority prefixes (Senior/Sr/Staff/Lead/Principal/Head/Director), " +
+                    "alternate phrasings, and closely related roles that are essentially the same job. " +
+                    "Return ONLY a flat JSON array of lowercase strings. No markdown, no explanation. Be very comprehensive.",
+                },
+                { role: "user", content: buildPromptSynonyms(role) },
+              ],
+              temperature: 0.2,
+              max_tokens: 600,
+            }),
+          });
+          if (synRes.ok) {
+            const synData = (await synRes.json()) as { choices: Array<{ message: { content: string } }> };
+            const raw = synData.choices[0]?.message?.content?.trim() ?? "[]";
+            const clean = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "").trim();
+            const parsed = JSON.parse(clean);
+            if (Array.isArray(parsed)) {
+              aiSynonyms = parsed.map((s: unknown) => String(s).toLowerCase()).filter(Boolean);
+            }
+          }
+        } catch { /* use static synonyms from normaliseRole */ }
+
         // ── Phase 1: COLLECT — no filtering during collection ──
         // Company queries paginate up to 10 pages (200 results each) = thousands of profiles.
         // Role queries paginate 2 pages max — used to catch people at unlisted companies.
-        // The scorer filters by role relevance AFTER collection.
+        // titleMatchesRole filters by role relevance before scoring (in both partials and final).
         const allRaw: Array<{ title: string; company: string; linkedinUrl: string; snippet: string }> = [];
         const seenUrls = new Set<string>();
         let lastPartialAt = 0;
@@ -288,11 +328,11 @@ export async function POST(req: NextRequest) {
           if (allRaw.length > prevCount) {
             send({ type: "progress", queriesDone: qi + 1, queriesTotal: queryList.length, profilesFound: allRaw.length });
 
-            // Every 30 new profiles, score what we have and stream a partial snapshot
-            // so the UI can show a live table and allow CSV download during the search.
+            // Every 30 new profiles, filter + score what we have and stream a partial snapshot.
             if (allRaw.length - lastPartialAt >= 30) {
               lastPartialAt = allRaw.length;
-              const partialScored = allRaw.map((p) =>
+              const partialFiltered = allRaw.filter((p) => titleMatchesRole(p.title, role, aiSynonyms));
+              const partialScored = partialFiltered.map((p) =>
                 scoreProfile(p, { role, location, preferredTiers: tiers as CompanyTier[] }),
               );
               const partialRanked = rankProfiles(partialScored).slice(0, 200);
@@ -305,43 +345,7 @@ export async function POST(req: NextRequest) {
 
         send({ type: "status", message: "Collected " + allRaw.length + " raw profiles. Filtering by role..." });
 
-        // ── Phase 2: AI synonym expansion (once, after collection) ──
-        let aiSynonyms: string[] = [];
-        try {
-          const synRes = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: "Bearer " + (process.env.AI_GATEWAY_API_KEY ?? ""),
-            },
-            body: JSON.stringify({
-              model: "gpt-4o-mini",
-              messages: [
-                {
-                  role: "system",
-                  content:
-                    "You are a LinkedIn recruiter expert. " +
-                    "Return every possible LinkedIn title variation for the given role. " +
-                    "Return ONLY a flat JSON array of lowercase strings. No markdown, no explanation.",
-                },
-                { role: "user", content: buildPromptSynonyms(role) },
-              ],
-              temperature: 0.2,
-              max_tokens: 600,
-            }),
-          });
-          if (synRes.ok) {
-            const synData = (await synRes.json()) as { choices: Array<{ message: { content: string } }> };
-            const raw = synData.choices[0]?.message?.content?.trim() ?? "[]";
-            const clean = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "").trim();
-            const parsed = JSON.parse(clean);
-            if (Array.isArray(parsed)) {
-              aiSynonyms = parsed.map((s: unknown) => String(s).toLowerCase()).filter(Boolean);
-            }
-          }
-        } catch { /* use static synonyms */ }
-
-        // ── Phase 3: FILTER by role title ──
+        // ── Phase 2: FILTER by role title (aiSynonyms already computed above) ──
         const filtered = allRaw.filter((p) => titleMatchesRole(p.title, role, aiSynonyms));
 
         send({ type: "status", message: filtered.length + " role-matched profiles. Scoring..." });
