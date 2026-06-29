@@ -1,29 +1,30 @@
-import { getTopStartups, getAllCompanies } from "./companies";
+
 
 const LOCATIONS_US = [
   "San Francisco", "New York", "Seattle", "Austin", "Denver",
   "Chicago", "Boston", "Los Angeles", "Washington DC", "Atlanta",
   "San Jose", "Palo Alto", "Mountain View", "Portland", "Miami",
-  "San Diego", "Pittsburgh", "Philadelphia",
 ];
 const LOCATIONS_EU = [
   "London", "Berlin", "Amsterdam", "Paris", "Dublin",
-  "Barcelona", "Madrid", "Stockholm", "Munich", "Zurich",
+  "Barcelona", "Stockholm", "Munich", "Zurich",
 ];
 const LOCATIONS_GLOBAL = [
-  "Singapore", "Bangalore", "Tokyo", "Sydney", "Toronto",
-  "Vancouver", "Tel Aviv", "Dubai", "Remote",
+  "Singapore", "Bangalore", "Tokyo", "Sydney", "Toronto", "Tel Aviv", "Remote",
 ];
 const ALL_LOCATIONS = [...LOCATIONS_US, ...LOCATIONS_EU, ...LOCATIONS_GLOBAL];
 
-const SENIORITY = ["junior", "mid-level", "senior", "staff", "principal", "lead", "head of", "director", "VP"];
+const SENIORITY = [
+  "junior", "mid-level", "senior", "staff", "principal",
+  "lead", "head of", "director", "VP",
+];
 
 function extractCoreTitle(input: string): string {
   let t = input.toLowerCase().trim();
-  t = t.split(/\b(?:at|in|for|like|from|with|who|that|and|or|such as|including)\b/)[0].trim();
-  t = t.replace(/\b(?:top|best|leading|great|amazing|incredible)\b/g, "").trim();
+  t = t.split(/\b(?:at|in|for|like|from|with|who|that|and|or)\b/)[0].trim();
+  t = t.replace(/\b(?:top|best|leading|great)\b/g, "").trim();
   t = t.replace(/\b(?:startups?|companies|firms)\b/g, "").trim();
-  t = t.replace(/^(senior|junior|lead|principal|staff|founding|distinguished|head of|director of|vp of)\s+/i, "").trim();
+  t = t.replace(/^(senior|junior|lead|principal|staff|founding|head of|director of|vp of)\s+/i, "").trim();
   return t.replace(/\s+/g, " ").trim();
 }
 
@@ -31,48 +32,40 @@ function generateTitleVariants(core: string): string[] {
   const v = new Set<string>();
   v.add(core);
   const transforms: [RegExp, string][] = [
-    [/\bengineer\b/, "developer"], [/\bdeveloper\b/, "engineer"],
-    [/\bforward deploy\w*\b/, "forward deployed"], [/\bforward deployed?\b/, "field"],
-    [/\bfield engineer\b/, "solutions engineer"], [/\bsolutions?\s*engineer\b/, "implementation engineer"],
-    [/\bdevops\b/, "site reliability"], [/\bsite reliability\b/, "devops"],
-    [/\bml\b/, "machine learning"], [/\bmachine learning\b/, "ML"],
-    [/\bplatform\b/, "infrastructure"], [/\binfrastructure\b/, "platform"],
-    [/\bfull[\s-]?stack\b/, "fullstack"], [/\bfullstack\b/, "full stack"],
-    [/\bfront[\s-]?end\b/, "frontend"], [/\bback[\s-]?end\b/, "backend"],
+    [/\bengineer\b/, "developer"],
+    [/\bdeveloper\b/, "engineer"],
+    [/\bdevops\b/, "site reliability"],
+    [/\bml\b/, "machine learning"],
+    [/\bmachine learning\b/, "ML"],
+    [/\bfull[\s-]?stack\b/, "fullstack"],
+    [/\bfront[\s-]?end\b/, "frontend"],
+    [/\bback[\s-]?end\b/, "backend"],
+    [/\bplatform\b/, "infrastructure"],
   ];
   for (const [p, r] of transforms) if (p.test(core)) v.add(core.replace(p, r).trim());
-  const words = core.split(/\s+/).filter(w => w.length > 1);
-  if (words.length >= 2 && words.length <= 4) {
-    const acr = words.map(w => w[0].toUpperCase()).join("");
-    if (acr.length >= 2 && acr.length <= 4) v.add(acr);
-  }
-  return [...v].filter(x => x.length > 1);
+  return [...v].filter((x) => x.length > 1);
 }
 
 export interface SearchIntent {
   titles: string[];
-  companies: string[];
   locations: string[];
   seniority: string[];
 }
 
-export function parseSearchIntent(input: string): SearchIntent {
-  const lower = input.toLowerCase();
-  const core = extractCoreTitle(input);
+export function parseSearchIntent(role: string): SearchIntent {
+  const lower = role.toLowerCase();
+  const core = extractCoreTitle(role);
   const titles = generateTitleVariants(core);
-  const all = getAllCompanies();
-  const companies = all.filter(c => lower.includes(c.toLowerCase()));
-  const locations = ALL_LOCATIONS.filter(l => lower.includes(l.toLowerCase()));
-  const seniority = SENIORITY.filter(s => lower.includes(s));
-  return { titles, companies, locations, seniority };
+  const locations = ALL_LOCATIONS.filter((l) => lower.includes(l.toLowerCase()));
+  const seniority = SENIORITY.filter((s) => lower.includes(s));
+  return { titles, locations, seniority };
 }
 
 export function generateQueries(
-  input: string,
-  opts: { maxQueries?: number; locations?: string[] } = {},
+  company: string,
+  opts: { maxQueries?: number; role?: string } = {},
 ): string[] {
-  const intent = parseSearchIntent(input);
-  const max = opts.maxQueries ?? 600;
+  const max = opts.maxQueries ?? 30;
   const seen = new Set<string>();
   const queries: string[] = [];
   const SITE = "site:linkedin.com/in/";
@@ -82,25 +75,29 @@ export function generateQueries(
     if (!seen.has(n)) { seen.add(n); queries.push(q); }
   }
 
-  let locs = opts.locations?.length ? opts.locations : intent.locations.length ? intent.locations : ALL_LOCATIONS.slice(0, 20);
-  locs = [...new Set([...locs, "Remote"])];
-  const companies = intent.companies.length > 0 ? intent.companies : getTopStartups(300);
-  const levels = intent.seniority.length > 0 ? intent.seniority : SENIORITY.slice(0, 6);
+  const locs = ALL_LOCATIONS.slice(0, 12);
+  const levels = SENIORITY.slice(0, 5);
 
-  // Title alone
-  for (const t of intent.titles) add(`${SITE} "${t}"`);
-  // Title x Location
-  for (const t of intent.titles.slice(0, 5)) for (const l of locs) add(`${SITE} "${t}" "${l}"`);
-  // Title x Company
-  for (const t of intent.titles.slice(0, 4)) for (const co of companies) add(`${SITE} "${t}" "${co}"`);
-  // Seniority x Title
-  for (const t of intent.titles.slice(0, 3)) for (const lv of levels) add(`${SITE} "${lv} ${t}"`);
-  // Seniority x Title x Location
-  for (const t of intent.titles.slice(0, 3)) for (const lv of levels.slice(0, 4)) for (const l of locs.slice(0, 8)) add(`${SITE} "${lv} ${t}" "${l}"`);
-  // Company x Location
-  for (const co of companies.slice(0, 50)) for (const l of locs.slice(0, 5)) add(`${SITE} "${co}" "${l}" engineer`);
-  // Broad
-  for (const t of intent.titles.slice(0, 3)) add(`linkedin.com/in/ "${t}"`);
+  if (opts.role) {
+    const intent = parseSearchIntent(opts.role);
+    for (const t of intent.titles) {
+      add(`${SITE} "${company}" "${t}"`);
+      for (const l of locs.slice(0, 5)) add(`${SITE} "${company}" "${t}" "${l}"`);
+      for (const lv of levels) add(`${SITE} "${company}" "${lv} ${t}"`);
+    }
+  }
+
+  // Generic company queries
+  add(`${SITE} "${company}" engineer`);
+  add(`${SITE} "${company}" developer`);
+  add(`${SITE} "${company}" product manager`);
+  add(`${SITE} "${company}" data scientist`);
+  add(`${SITE} "${company}" designer`);
+  add(`${SITE} "${company}" marketing`);
+  add(`${SITE} "${company}" sales`);
+  add(`${SITE} "${company}" operations`);
+  for (const lv of levels) add(`${SITE} "${company}" "${lv}" engineer`);
+  for (const l of locs.slice(0, 6)) add(`${SITE} "${company}" "${l}"`);
 
   // Shuffle
   for (let i = queries.length - 1; i > 0; i--) {
@@ -108,4 +105,76 @@ export function generateQueries(
     [queries[i], queries[j]] = [queries[j], queries[i]];
   }
   return queries.slice(0, max);
+}
+
+// ── AI-powered query generation via Vercel AI Gateway ──────────
+
+export async function generateAIQueries(opts: {
+  role: string;
+  companies: string[];
+  maxQueriesPerCompany?: number;
+}): Promise<{ company: string; queries: string[] }[]> {
+  const perCompany = opts.maxQueriesPerCompany ?? 20;
+  const companySample = opts.companies.slice(0, 50).join(", ");
+
+  // Call Vercel AI Gateway directly via fetch (OpenAI-compatible API)
+  const gatewayRes = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY ?? ""}`,
+    },
+    body: JSON.stringify({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content: `You are an expert at generating LinkedIn search queries to find professionals.
+Generate highly targeted search queries using this format: site:linkedin.com/in/ "keyword1" "keyword2"
+Vary across: job title synonyms, seniority levels, skills, locations.
+Return ONLY valid search queries, one per line. No explanations.`,
+        },
+        {
+          role: "user",
+          content: `Generate ${perCompany} search queries per company to find: "${opts.role}"
+Companies: ${companySample}
+For each company, prefix the company name so we know which company the query is for.
+Format each line as: COMPANY_NAME|query
+Example: Stripe|site:linkedin.com/in/ "Stripe" "software engineer" "San Francisco"`,
+        },
+      ],
+      temperature: 0.8,
+      max_tokens: 4000,
+    }),
+  });
+
+  if (!gatewayRes.ok) {
+    throw new Error(`AI Gateway error: ${gatewayRes.status}`);
+  }
+
+  const gatewayData = await gatewayRes.json() as {
+    choices: Array<{ message: { content: string } }>;
+  };
+  const text = gatewayData.choices[0]?.message?.content ?? "";
+
+  const lines = text.split("\n").map((l) => l.trim()).filter((l) => l.includes("|"));
+  const byCompany = new Map<string, string[]>();
+
+  for (const line of lines) {
+    const pipeIdx = line.indexOf("|");
+    const company = line.slice(0, pipeIdx).trim();
+    const query = line.slice(pipeIdx + 1).trim();
+    if (!company || !query || !query.includes("linkedin")) continue;
+    const normalized = opts.companies.find(
+      (c) => c.toLowerCase() === company.toLowerCase(),
+    ) ?? company;
+    const arr = byCompany.get(normalized) ?? [];
+    arr.push(query);
+    byCompany.set(normalized, arr);
+  }
+
+  return opts.companies.map((company) => ({
+    company,
+    queries: byCompany.get(company) ?? generateQueries(company, { role: opts.role, maxQueries: perCompany }),
+  }));
 }

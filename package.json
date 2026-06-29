@@ -1,6 +1,6 @@
 {
   "name": "linkedin-scraper",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -9,12 +9,15 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "better-sqlite3": "^11.7.0",
+    "@ai-sdk/openai": "^4.0.2",
+    "@ai-sdk/react": "^1.0.0",
+    "ai": "^4.0.0",
     "cheerio": "^1.0.0",
+    "drizzle-orm": "^0.36.0",
     "framer-motion": "^11.18.0",
     "lucide-react": "^0.468.0",
     "next": "^14.2.21",
-    "openai": "^4.77.0",
+    "pg": "^8.13.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "recharts": "^2.15.0",
@@ -23,8 +26,8 @@
   },
   "devDependencies": {
     "@tailwindcss/forms": "^0.5.9",
-    "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.10.5",
+    "@types/pg": "^8.11.0",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "autoprefixer": "^10.4.20",
