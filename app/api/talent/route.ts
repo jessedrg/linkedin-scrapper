@@ -86,40 +86,114 @@ async function generateTalentQueries(opts: {
     if (!seen.has(k) && k.length > 20) { seen.add(k); queries.push({ query: q, type }); }
   };
 
-  const locStr = location ? " \"" + location + "\"" : "";
-
-  // ── TIER A: Role variant × Company ──────────────────────────────────────────
-  // The core strategy: for every role variant (synonym) and every company,
-  // generate one query. Brave finds different profiles for each variant.
-  // e.g. "Palantir" "FDE", "Palantir" "Forward Deployed Engineer", "Palantir" "Field Engineer"
-  // With 12 variants × 300 companies = 3,600 queries × ~20 results = 72,000 raw profiles.
-  for (const variant of allVariants) {
-    for (const company of companies) {
-      add(SITE + " \"" + company + "\" \"" + variant + "\"", "company");
+  // Build location variants — search the city AND common nearby/metro phrasings.
+  const locationVariants: string[] = [];
+  if (location) {
+    locationVariants.push(location);
+    const loc = location.toLowerCase();
+    if (loc.includes("san francisco") || loc.includes("sf")) {
+      locationVariants.push("Bay Area", "San Francisco Bay Area", "Silicon Valley");
+    } else if (loc.includes("new york") || loc.includes("nyc")) {
+      locationVariants.push("New York City", "Greater New York");
+    } else if (loc.includes("london")) {
+      locationVariants.push("Greater London", "London Area");
     }
   }
 
-  // ── TIER B: Role variant only (no company) — global + location sweep ────────
-  // Catches people at companies not in our list.
-  for (const variant of allVariants) {
-    add(SITE + " \"" + variant + "\"", "role");
-    if (location) add(SITE + " \"" + variant + "\"" + locStr, "role");
-  }
+  const seniorityPrefixes = ["", "Senior ", "Staff ", "Lead ", "Principal "];
 
-  // ── TIER C: Seniority prefix × variant × company (top companies only) ───────
-  // Adds "Senior", "Staff", "Lead" prefix variations for top-tier companies.
-  const seniorityPrefixes = ["Senior ", "Staff ", "Lead ", "Principal "];
-  const topCompanies = companies.slice(0, 30);
-  for (const prefix of seniorityPrefixes) {
-    for (const variant of allVariants.slice(0, 4)) {
-      add(SITE + " \"" + prefix + variant + "\"", "role");
-      for (const company of topCompanies) {
-        add(SITE + " \"" + company + "\" \"" + prefix + variant + "\"", "company");
+  // ── PRIMARY: Title × Location (NO company) ──────────────────────────────────
+  // This is now the main strategy: filter by ROLE + LOCATION, not by company.
+  // The AI then evaluates whether each person's current company is a good startup.
+  // e.g. "Forward Deployed Engineer" "San Francisco", "FDE" "Bay Area", etc.
+  if (locationVariants.length > 0) {
+    for (const variant of allVariants) {
+      for (const prefix of seniorityPrefixes) {
+        for (const locV of locationVariants) {
+          add(SITE + " \"" + prefix + variant + "\" \"" + locV + "\"", "role");
+        }
       }
     }
   }
 
+  // ── SECONDARY: Title only (no company, no location) — global reach ──────────
+  // Catches strong candidates regardless of where they're listed.
+  for (const variant of allVariants) {
+    for (const prefix of seniorityPrefixes.slice(0, 3)) {
+      add(SITE + " \"" + prefix + variant + "\"", "role");
+    }
+  }
+
+  // ── TERTIARY: Title × top companies — only the very best companies ──────────
+  // A light sweep of elite companies to ensure we don't miss obvious top talent.
+  const topCompanies = companies.slice(0, 40);
+  for (const variant of allVariants.slice(0, 6)) {
+    for (const company of topCompanies) {
+      add(SITE + " \"" + company + "\" \"" + variant + "\"", "company");
+    }
+  }
+
   return queries.slice(0, opts.totalQueries);
+}
+
+// ── AI company evaluator ────────────────────────────────────────────────────
+// Uses a cheap model to judge whether each (unknown) company is a good startup.
+// Returns a map of companyName(lowercase) → { tier, rating(0-10), note }.
+async function aiEvaluateCompanies(
+  companyNames: string[],
+): Promise<Map<string, { rating: number; label: string; note: string }>> {
+  const result = new Map<string, { rating: number; label: string; note: string }>();
+  if (companyNames.length === 0) return result;
+
+  // De-dupe and cap to keep the prompt cheap
+  const unique = Array.from(new Set(companyNames.map((c) => c.trim()).filter(Boolean))).slice(0, 60);
+  if (unique.length === 0) return result;
+
+  try {
+    const res = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + (process.env.AI_GATEWAY_API_KEY ?? ""),
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini", // cheap model for company evaluation
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a startup/tech-company analyst. For each company name, judge how impressive it is " +
+              "as a place to work for a top engineer, based on your knowledge (funding, prestige, growth, talent bar). " +
+              "rating: 0-10 (10 = elite like OpenAI/Stripe/Palantir, 7-9 = strong well-funded startup or big tech, " +
+              "4-6 = decent/mid startup, 1-3 = unknown/weak, 0 = not a real company). " +
+              "label: one of \"Elite\", \"Strong\", \"Decent\", \"Weak\", \"Unknown\". " +
+              "note: max 6 words. " +
+              "Return ONLY a JSON array: [{\"company\": \"Name\", \"rating\": N, \"label\": \"...\", \"note\": \"...\"}]",
+          },
+          { role: "user", content: "Companies:\n" + unique.map((c, i) => (i + 1) + ". " + c).join("\n") },
+        ],
+        temperature: 0.2,
+        max_tokens: 2000,
+      }),
+    });
+    if (!res.ok) return result;
+    const data = (await res.json()) as { choices: Array<{ message: { content: string } }> };
+    const text = data.choices[0]?.message?.content ?? "";
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return result;
+    const parsed = JSON.parse(jsonMatch[0]) as Array<{ company: string; rating: number; label: string; note: string }>;
+    for (const p of parsed) {
+      if (p.company) {
+        result.set(p.company.toLowerCase().trim(), {
+          rating: Math.max(0, Math.min(10, Number(p.rating) || 0)),
+          label: p.label || "Unknown",
+          note: p.note || "",
+        });
+      }
+    }
+  } catch { /* fall back to heuristic scoring */ }
+
+  return result;
 }
 
 // ── AI re-ranker ──────────────────────────────────────────────────────────────
@@ -340,6 +414,36 @@ export async function POST(req: NextRequest) {
           scoreProfile(p, { role, location, preferredTiers: tiers as CompanyTier[] }),
         );
         let ranked = rankProfiles(scored);
+
+        // ── Phase 4b: AI company evaluation (cheap model) ──
+        // For the top candidates, evaluate whether their CURRENT company is a good
+        // startup/employer and adjust scores. This is the key signal now that we
+        // filter by location+title rather than by a fixed company list.
+        send({ type: "status", message: "AI evaluating companies of top candidates..." });
+        const topForCompanyEval = ranked.slice(0, 120);
+        const companyEval = await aiEvaluateCompanies(topForCompanyEval.map((p) => p.company));
+        if (companyEval.size > 0) {
+          ranked = ranked.map((p) => {
+            const evalResult = companyEval.get((p.company || "").toLowerCase().trim());
+            if (!evalResult) return p;
+            // Map rating 0-10 to a score delta of -10..+20
+            const delta = Math.round((evalResult.rating - 4) * 3);
+            const newTier =
+              evalResult.rating >= 9 ? "S" :
+              evalResult.rating >= 7 ? "A" :
+              evalResult.rating >= 4 ? "Unknown" : p.companyTier;
+            return {
+              ...p,
+              score: Math.max(0, Math.min(100, p.score + delta)),
+              companyTier: (p.companyTier && p.companyTier !== "Unknown") ? p.companyTier : (newTier as typeof p.companyTier),
+              startupSignals: evalResult.note
+                ? Array.from(new Set([...(p.startupSignals ?? []), evalResult.label + ": " + evalResult.note]))
+                : p.startupSignals,
+              matchReasons: [...p.matchReasons, "Company (AI): " + evalResult.label + " (" + evalResult.rating + "/10)"],
+            };
+          });
+          ranked.sort((a, b) => b.score - a.score);
+        }
 
         send({ type: "status", message: "AI re-ranking top " + Math.min(ranked.length, 30) + " profiles..." });
 

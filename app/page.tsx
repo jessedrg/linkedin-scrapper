@@ -122,28 +122,29 @@ export default function HomePage() {
     <div className="min-h-screen">
       {/* Header */}
       <header className="sticky top-0 z-50 border-b border-white/5 bg-[#0a0a0f]/80 backdrop-blur-xl">
-        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
-          <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-brand-600 shadow-lg shadow-brand-500/25">
-              <Zap className="h-5 w-5 text-white" />
+        <div className="mx-auto flex h-14 sm:h-16 max-w-7xl items-center justify-between gap-2 px-3 sm:px-6">
+          <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+            <div className="flex h-8 w-8 sm:h-9 sm:w-9 items-center justify-center rounded-lg bg-brand-600 shadow-lg shadow-brand-500/25">
+              <Zap className="h-4 w-4 sm:h-5 sm:w-5 text-white" />
             </div>
-            <span className="text-lg font-semibold tracking-tight">LinkedIn Scraper</span>
-            <span className="rounded-full bg-brand-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-brand-400">AI</span>
+            <span className="text-base sm:text-lg font-semibold tracking-tight">LinkedIn Scraper</span>
+            <span className="rounded-full bg-brand-500/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-brand-400 hidden sm:inline">AI</span>
           </div>
 
-          <nav className="flex items-center gap-1">
+          <nav className="flex items-center gap-0.5 sm:gap-1 overflow-x-auto no-scrollbar">
             {navItems.map((item) => (
               <button
                 key={item.id}
                 onClick={() => { setTab(item.id); if (item.id === "dashboard") loadStats(); }}
-                className={`relative flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all ${
+                title={item.label}
+                className={`relative flex items-center gap-2 rounded-lg px-2.5 sm:px-4 py-2 text-sm font-medium transition-all shrink-0 ${
                   tab === item.id ? "bg-white/10 text-white" : "text-white/40 hover:text-white/70"
                 }`}
               >
                 {item.icon}
-                {item.label}
+                <span className="hidden md:inline">{item.label}</span>
                 {item.badge && (
-                  <span className="rounded-sm bg-cyan-500/20 px-1 py-0.5 text-[9px] font-bold uppercase tracking-widest text-cyan-400">
+                  <span className="rounded-sm bg-cyan-500/20 px-1 py-0.5 text-[9px] font-bold uppercase tracking-widest text-cyan-400 hidden md:inline">
                     {item.badge}
                   </span>
                 )}
@@ -152,7 +153,7 @@ export default function HomePage() {
           </nav>
 
           {progress?.status === "running" && (
-            <div className="flex items-center gap-2 rounded-full bg-brand-500/10 px-3 py-1.5 text-xs text-brand-400">
+            <div className="hidden lg:flex items-center gap-2 rounded-full bg-brand-500/10 px-3 py-1.5 text-xs text-brand-400 shrink-0">
               <div className="h-1.5 w-1.5 rounded-full bg-brand-400 live-dot" />
               {progress.profilesFound} found &middot; {progress.queriesUsed}/{progress.queriesTotal} queries
             </div>
@@ -161,7 +162,7 @@ export default function HomePage() {
       </header>
 
       {/* Content */}
-      <main className="mx-auto max-w-7xl px-6 py-8">
+      <main className="mx-auto max-w-7xl px-3 sm:px-6 py-5 sm:py-8">
         {tab === "dashboard" && (
           <Dashboard
             stats={stats}
@@ -1349,11 +1350,11 @@ function TalentView() {
 
           {/* Ranking table */}
           <div className="glass-card overflow-hidden">
-            <div className="grid grid-cols-[40px_80px_1fr_auto_auto] items-center gap-0 border-b border-white/5 px-5 py-3 text-[10px] font-semibold uppercase tracking-wider text-white/25">
+            <div className="grid grid-cols-[28px_1fr_auto] sm:grid-cols-[40px_80px_1fr_auto_auto] items-center gap-0 border-b border-white/5 px-3 sm:px-5 py-3 text-[10px] font-semibold uppercase tracking-wider text-white/25">
               <span>#</span>
-              <span>First</span>
+              <span className="hidden sm:inline">First</span>
               <span>Profile</span>
-              <span className="text-right pr-6">Tier</span>
+              <span className="hidden sm:inline text-right pr-6">Tier</span>
               <span className="text-right">Score</span>
             </div>
             <div className="divide-y divide-white/[0.04]">
@@ -1366,20 +1367,20 @@ function TalentView() {
                   <div key={p.linkedinUrl}>
                     <button
                       onClick={() => setExpandedIdx(isExpanded ? null : i)}
-                      className="w-full grid grid-cols-[40px_80px_1fr_auto_auto] items-center gap-0 px-5 py-4 text-left hover:bg-white/[0.025] transition-colors group"
+                      className="w-full grid grid-cols-[28px_1fr_auto] sm:grid-cols-[40px_80px_1fr_auto_auto] items-center gap-0 px-3 sm:px-5 py-3 sm:py-4 text-left hover:bg-white/[0.025] transition-colors group"
                     >
                       {/* Rank */}
                       <span className={`text-sm font-bold tabular-nums ${rankColor}`}>
                         {rank <= 3 ? ["🥇","🥈","🥉"][rank-1] : rank}
                       </span>
 
-                      {/* Firstname */}
-                      <span className="text-sm font-semibold text-white/70 truncate pr-2">
+                      {/* Firstname — desktop only */}
+                      <span className="hidden sm:block text-sm font-semibold text-white/70 truncate pr-2">
                         {p.firstname || "—"}
                       </span>
 
                       {/* Profile info */}
-                      <div className="min-w-0 pr-4">
+                      <div className="min-w-0 pr-2 sm:pr-4">
                         <div className="flex items-center gap-2 mb-0.5">
                           <span className="font-semibold text-sm text-white/90 truncate">
                             {p.name || p.title.split(" - ")[0] || "Unknown"}
@@ -1391,11 +1392,19 @@ function TalentView() {
                           )}
                         </div>
                         <div className="text-xs text-white/40 truncate">{p.title}</div>
-                        <div className="text-xs text-white/25 truncate">{p.company}</div>
+                        <div className="text-xs text-white/25 truncate flex items-center gap-1.5">
+                          {p.company}
+                          {/* On mobile, show tier inline since the tier column is hidden */}
+                          {tierCfg && (
+                            <span className={`sm:hidden inline-flex items-center rounded border px-1 py-0 text-[9px] font-bold whitespace-nowrap ${tierCfg.color} ${tierCfg.bg} ${tierCfg.border}`}>
+                              {tierCfg.label}
+                            </span>
+                          )}
+                        </div>
                       </div>
 
-                      {/* Tier badge + startup signals */}
-                      <div className="pr-4 flex flex-col items-end gap-1">
+                      {/* Tier badge + startup signals — desktop only */}
+                      <div className="hidden sm:flex pr-4 flex-col items-end gap-1">
                         {tierCfg ? (
                           <span className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-bold whitespace-nowrap ${tierCfg.color} ${tierCfg.bg} ${tierCfg.border}`}>
                             <span className="text-[8px]">{tierCfg.icon}</span>
@@ -1417,7 +1426,7 @@ function TalentView() {
                       </div>
 
                       {/* Score */}
-                      <div className="flex flex-col items-end gap-1">
+                      <div className="flex flex-col items-end gap-1 pl-2">
                         <ScoreBar score={p.score} />
                         <ChevronDown className={`h-3 w-3 text-white/20 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
                       </div>
