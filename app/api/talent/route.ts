@@ -16,7 +16,6 @@ import {
   rankProfiles,
   extractCompanyFromResult,
   normaliseRole,
-  titleMatchesRole,
 } from "@/lib/scraper/scorer";
 import { getCompaniesByTier, type CompanyTier } from "@/lib/scraper/companies";
 import { db } from "@/lib/db";
@@ -40,14 +39,6 @@ function buildPromptQueryGen(role: string, location: string, companySample: stri
   );
 }
 
-function buildPromptSynonyms(role: string): string {
-  return (
-    "Role: \"" + role + "\"\n\n" +
-    "Return a flat JSON array of all LinkedIn title variations for this role." +
-    " Include abbreviations, seniority prefixes, alternate phrasings, and closely related roles." +
-    " Lowercase strings only. No markdown, no explanation."
-  );
-}
 
 function buildPromptRerank(role: string, location: string, profileLines: string): string {
   const loc = location ? "\nLocation: \"" + location + "\"" : "";
@@ -78,31 +69,40 @@ async function generateTalentQueries(opts: {
   };
 
   const locStr = location ? " \"" + location + "\"" : "";
-  const seniorityPrefixes = ["", "senior ", "staff ", "principal ", "lead ", "founding "];
+  // Only a few seniority prefixes — too many creates redundant queries that Brave dedupes internally
+  const seniorityPrefixes = ["", "senior ", "staff ", "lead "];
 
-  // Tier 1: exact phrase + seniority variants, with and without company
+  // Strategy: maximize DIVERSITY of queries to avoid Brave returning the same result set.
+  // Key insight: queries with the same title but different companies return DIFFERENT profiles.
+  // So we spread across many companies rather than adding seniority variants.
+
+  // --- Round 1: No-company queries (broadest reach, no location) ---
+  // These catch people at companies not in our list, and maximize geographic diversity
   for (const phrase of exactPhrases) {
     for (const prefix of seniorityPrefixes) {
-      const titleQ = "\"" + prefix + phrase + "\"";
-      add(SITE + " " + titleQ + locStr);
-      for (const company of companies.slice(0, 40)) {
-        add(SITE + " \"" + company + "\" " + titleQ + locStr);
-      }
+      add(SITE + " \"" + prefix + phrase + "\"");
+      if (location) add(SITE + " \"" + prefix + phrase + "\"" + locStr);
+    }
+  }
+  for (const title of titles) {
+    add(SITE + " \"" + title + "\"");
+    if (location) add(SITE + " \"" + title + "\"" + locStr);
+  }
+
+  // --- Round 2: Company-specific queries (no location — wider reach per company) ---
+  // One query per company per phrase — no seniority prefix variation to avoid Brave dedup
+  for (const company of companies) {
+    for (const phrase of exactPhrases) {
+      add(SITE + " \"" + company + "\" \"" + phrase + "\"");
+    }
+    for (const title of titles.slice(0, 3)) {
+      add(SITE + " \"" + company + "\" \"" + title + "\"");
     }
   }
 
-  // Tier 2: alias titles
-  for (const title of titles.slice(0, 4)) {
-    const titleQ = "\"" + title + "\"";
-    add(SITE + " " + titleQ + locStr);
-    for (const company of companies.slice(0, 20)) {
-      add(SITE + " \"" + company + "\" " + titleQ + locStr);
-    }
-  }
-
-  // Tier 3: AI-generated queries
+  // --- Round 3: AI-generated queries for maximum variety ---
   try {
-    const companySample = companies.slice(0, 25).join(", ");
+    const companySample = companies.slice(0, 30).join(", ");
     const res = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -116,13 +116,15 @@ async function generateTalentQueries(opts: {
             role: "system",
             content:
               "You are an expert LinkedIn talent sourcer. " +
-              "EVERY query MUST contain the exact role title or a close synonym as a quoted phrase. " +
-              "Return ONLY raw queries, one per line. No numbering, no explanations.",
+              "Generate maximally DIVERSE search queries — different companies, different title synonyms, different phrasings. " +
+              "EVERY query must contain the role title or a synonym as a quoted phrase. " +
+              "DO NOT repeat the same title with just a seniority prefix — that wastes queries. " +
+              "Return ONLY raw site:linkedin.com/in/ queries, one per line. No numbering.",
           },
           { role: "user", content: buildPromptQueryGen(role, location, companySample) },
         ],
-        temperature: 0.7,
-        max_tokens: 2000,
+        temperature: 0.9,
+        max_tokens: 3000,
       }),
     });
     if (res.ok) {
@@ -130,7 +132,7 @@ async function generateTalentQueries(opts: {
       const text = data.choices[0]?.message?.content ?? "";
       for (const line of text.split("\n")) {
         const q = line.trim().replace(/^\d+\.\s*/, "");
-        if (q.startsWith("site:linkedin.com/in/")) add(q);
+        if (q.toLowerCase().startsWith("site:linkedin.com/in/")) add(q);
       }
     }
   } catch { /* bonus — continue with static */ }
@@ -282,51 +284,12 @@ export async function POST(req: NextRequest) {
           if (allRaw.length >= 5000) break;
         }
 
-        send({ type: "status", message: "Collected " + allRaw.length + " profiles. Getting AI synonyms..." });
+        send({ type: "status", message: "Collected " + allRaw.length + " profiles. Scoring..." });
 
-        // ── Phase 2: AI synonym expansion (once, after collection) ──
-        let aiSynonyms: string[] = [];
-        try {
-          const synRes = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: "Bearer " + (process.env.AI_GATEWAY_API_KEY ?? ""),
-            },
-            body: JSON.stringify({
-              model: "gpt-4o-mini",
-              messages: [
-                {
-                  role: "system",
-                  content:
-                    "You are a LinkedIn recruiter expert. " +
-                    "Return every possible LinkedIn title variation for the given role. " +
-                    "Return ONLY a flat JSON array of lowercase strings. No markdown, no explanation.",
-                },
-                { role: "user", content: buildPromptSynonyms(role) },
-              ],
-              temperature: 0.2,
-              max_tokens: 600,
-            }),
-          });
-          if (synRes.ok) {
-            const synData = (await synRes.json()) as { choices: Array<{ message: { content: string } }> };
-            const raw = synData.choices[0]?.message?.content?.trim() ?? "[]";
-            const clean = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "").trim();
-            const parsed = JSON.parse(clean);
-            if (Array.isArray(parsed)) {
-              aiSynonyms = parsed.map((s: unknown) => String(s).toLowerCase()).filter(Boolean);
-            }
-          }
-        } catch { /* use static synonyms */ }
-
-        // ── Phase 3: FILTER by role title ──
-        const filtered = allRaw.filter((p) => titleMatchesRole(p.title, role, aiSynonyms));
-
-        send({ type: "status", message: filtered.length + " role-matched profiles. Scoring..." });
-
-        // ── Phase 4: SCORE ──
-        const scored = filtered.map((p) =>
+        // ── Phase 2: SCORE ──
+        // No title-filter here — queries already contain the role as a quoted phrase,
+        // so Brave already enforced relevance. Over-filtering was killing volume.
+        const scored = allRaw.map((p) =>
           scoreProfile(p, { role, location, preferredTiers: tiers as CompanyTier[] }),
         );
         let ranked = rankProfiles(scored);
