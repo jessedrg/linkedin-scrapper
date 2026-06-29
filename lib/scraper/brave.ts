@@ -47,41 +47,39 @@ export async function searchBrave(
 }
 
 /**
- * Fast single-page search: fetches one page of Brave results per query.
- * We get volume by running many diverse queries, not by deep-paginating one query.
- * Each call costs ~700ms (Brave rate limit), so 250 queries ≈ 3 minutes total.
+ * Deep paginated search: fetches ALL pages (up to 10 x 20 = 200 results) for a query.
+ * Used for company-only queries where we want every employee Brave has indexed.
+ * Rate: ~700ms per page request.
  */
 export async function searchBraveDeep(
   query: string,
   apiKey: string,
-  opts: { maxResults?: number; delayMs?: number } = {},
+  opts: { maxPages?: number; delayMs?: number } = {},
 ): Promise<SearchResult[]> {
+  const maxPages = opts.maxPages ?? 10; // Brave max is offset 0-9 = 10 pages x 20 = 200 results
   const delayMs = opts.delayMs ?? 700;
   const out: SearchResult[] = [];
   const seen = new Set<string>();
 
-  // Always fetch page 0
-  let batch: SearchResult[] = [];
-  try {
-    batch = await searchBrave(query, apiKey, 0, 20);
-  } catch {
-    return [];
-  }
-  for (const r of batch) {
-    const u = r.link.split("?")[0];
-    if (!seen.has(u)) { seen.add(u); out.push(r); }
-  }
+  for (let page = 0; page < maxPages; page++) {
+    if (page > 0) await new Promise((r) => setTimeout(r, delayMs));
 
-  // Fetch page 1 only if first page was full (likely more results)
-  if (batch.length >= 18) {
-    await new Promise((r) => setTimeout(r, delayMs));
+    let batch: SearchResult[] = [];
     try {
-      const batch2 = await searchBrave(query, apiKey, 1, 20);
-      for (const r of batch2) {
-        const u = r.link.split("?")[0];
-        if (!seen.has(u)) { seen.add(u); out.push(r); }
-      }
-    } catch { /* ignore */ }
+      batch = await searchBrave(query, apiKey, page, 20);
+    } catch {
+      break;
+    }
+
+    if (batch.length === 0) break; // no more results for this query
+
+    for (const r of batch) {
+      const u = r.link.split("?")[0];
+      if (!seen.has(u)) { seen.add(u); out.push(r); }
+    }
+
+    // If we got fewer than 15 results, this was the last page
+    if (batch.length < 15) break;
   }
 
   return out;

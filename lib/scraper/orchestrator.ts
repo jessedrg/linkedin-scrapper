@@ -123,7 +123,7 @@ export async function runScrape(opts: {
         let results: SearchResult[] = [];
         try {
           results = await searchBraveDeep(query, braveKey, {
-            maxResults: maxResultsPerQuery,
+            maxPages: 2,
             delayMs: 1100,
           });
         } catch {
