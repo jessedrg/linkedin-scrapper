@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
-import { Toaster } from "sonner";
-import "./globals.css";
+import { ToasterProvider } from "@/components/toaster-provider";
+import "../styles/globals.css";
 
 export const metadata: Metadata = {
   title: "LinkedIn Scraper AI",
@@ -20,17 +20,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <div className="relative z-10">
           {children}
         </div>
-        <Toaster
-          theme="dark"
-          position="bottom-right"
-          toastOptions={{
-            style: {
-              background: "#16161f",
-              border: "1px solid rgba(255,255,255,0.1)",
-              color: "#f0f0f5",
-            },
-          }}
-        />
+        <ToasterProvider />
       </body>
     </html>
   );
