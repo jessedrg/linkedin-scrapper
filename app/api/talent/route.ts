@@ -86,49 +86,26 @@ async function generateTalentQueries(opts: {
     if (!seen.has(k) && k.length > 20) { seen.add(k); queries.push({ query: q, type }); }
   };
 
-  // Build location variants — search the city AND common nearby/metro phrasings.
-  const locationVariants: string[] = [];
-  if (location) {
-    locationVariants.push(location);
-    const loc = location.toLowerCase();
-    if (loc.includes("san francisco") || loc.includes("sf")) {
-      locationVariants.push("Bay Area", "San Francisco Bay Area", "Silicon Valley");
-    } else if (loc.includes("new york") || loc.includes("nyc")) {
-      locationVariants.push("New York City", "Greater New York");
-    } else if (loc.includes("london")) {
-      locationVariants.push("Greater London", "London Area");
-    }
-  }
-
   const seniorityPrefixes = ["", "Senior ", "Staff ", "Lead ", "Principal "];
 
-  // ── PRIMARY: Title × Location (NO company) ──────────────────────────────────
-  // This is now the main strategy: filter by ROLE + LOCATION, not by company.
-  // The AI then evaluates whether each person's current company is a good startup.
-  // e.g. "Forward Deployed Engineer" "San Francisco", "FDE" "Bay Area", etc.
-  if (locationVariants.length > 0) {
-    for (const variant of allVariants) {
-      for (const prefix of seniorityPrefixes) {
-        for (const locV of locationVariants) {
-          add(SITE + " \"" + prefix + variant + "\" \"" + locV + "\"", "role");
-        }
-      }
-    }
-  }
+  // IMPORTANT: queries are emitted in order of PRODUCTIVITY (most results first),
+  // because the final list is capped with slice(0, totalQueries). Location is NEVER
+  // quoted inside the query — Brave requires the exact string to appear verbatim,
+  // which almost no LinkedIn snippet contains, returning ~0 results. Location is
+  // applied later by the scorer instead.
 
-  // ── SECONDARY: Title only (no company, no location) — global reach ──────────
-  // Catches strong candidates regardless of where they're listed.
+  // ── PRIMARY: Title only (no company, no location) — highest yield ───────────
+  // Each of these returns the broadest set of matching profiles globally.
   for (const variant of allVariants) {
-    for (const prefix of seniorityPrefixes.slice(0, 3)) {
+    for (const prefix of seniorityPrefixes) {
       add(SITE + " \"" + prefix + variant + "\"", "role");
     }
   }
 
-  // ── TERTIARY: Title × top companies — only the very best companies ──────────
-  // A light sweep of elite companies to ensure we don't miss obvious top talent.
-  const topCompanies = companies.slice(0, 40);
-  for (const variant of allVariants.slice(0, 6)) {
-    for (const company of topCompanies) {
+  // ── SECONDARY: Title × company — one query per variant per company ───────────
+  // Brave pre-filters by role; the scorer applies location + company-quality bonuses.
+  for (const variant of allVariants) {
+    for (const company of companies) {
       add(SITE + " \"" + company + "\" \"" + variant + "\"", "company");
     }
   }
