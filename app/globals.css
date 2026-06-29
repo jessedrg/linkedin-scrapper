@@ -29,6 +29,10 @@ body {
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #3a3a4a; }
 
+/* Hide scrollbar (used on horizontally-scrolling mobile nav) */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
 /* Glassmorphism card */
 @layer components {
   .glass-card {

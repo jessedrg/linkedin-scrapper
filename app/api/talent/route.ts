@@ -65,10 +65,19 @@ async function generateTalentQueries(opts: {
   location: string;
   companies: string[];
   totalQueries: number;
+  roleSynonyms?: string[]; // AI-generated synonyms passed in from pre-fetch
 }): Promise<{ query: string; type: "company" | "role" }[]> {
-  const { role, location, companies } = opts;
+  const { role, location, companies, roleSynonyms = [] } = opts;
   const SITE = "site:linkedin.com/in/";
   const { exactPhrases, titles } = normaliseRole(role);
+
+  // Build the full set of role title variants to use in queries.
+  // Deduplicate and cap at 12 variants — more than that creates redundant queries.
+  const allVariants = Array.from(new Set([
+    ...exactPhrases,
+    ...titles,
+    ...roleSynonyms,
+  ])).slice(0, 12);
 
   const queries: { query: string; type: "company" | "role" }[] = [];
   const seen = new Set<string>();
@@ -77,29 +86,70 @@ async function generateTalentQueries(opts: {
     if (!seen.has(k) && k.length > 20) { seen.add(k); queries.push({ query: q, type }); }
   };
 
-  // ── TIER A: Company-only queries — NO role phrase, NO location ──
-  // Each company query can return up to 200 results (10 pages x 20).
-  // With 300 companies = up to 60,000 raw profiles.
-  // The role filter happens AFTER collection in the scorer.
-  for (const company of companies) {
-    add(SITE + " \"" + company + "\"", "company");
+  // Build location variants — search the city AND common nearby/metro phrasings.
+  const locationVariants: string[] = [];
+  if (location) {
+    locationVariants.push(location);
+    const loc = location.toLowerCase();
+    if (loc.includes("san francisco") || loc.includes("sf")) {
+      locationVariants.push("Bay Area", "San Francisco Bay Area", "Silicon Valley");
+    } else if (loc.includes("new york") || loc.includes("nyc")) {
+      locationVariants.push("New York City", "Greater New York");
+    } else if (loc.includes("london")) {
+      locationVariants.push("Greater London", "London Area");
+    }
   }
 
-  // ── TIER B: Role-phrase queries — catch people outside our company list ──
-  // No location = global reach. Location variant as secondary.
-  const locStr = location ? " \"" + location + "\"" : "";
-  for (const phrase of exactPhrases) {
-    add(SITE + " \"" + phrase + "\"", "role");
-    if (location) add(SITE + " \"" + phrase + "\"" + locStr, "role");
-  }
-  for (const title of titles) {
-    add(SITE + " \"" + title + "\"", "role");
-    if (location) add(SITE + " \"" + title + "\"" + locStr, "role");
+  const seniorityPrefixes = ["", "Senior ", "Staff ", "Lead ", "Principal "];
+
+  // ── PRIMARY: Title × Location (NO company) ──────────────────────────────────
+  // This is now the main strategy: filter by ROLE + LOCATION, not by company.
+  // The AI then evaluates whether each person's current company is a good startup.
+  // e.g. "Forward Deployed Engineer" "San Francisco", "FDE" "Bay Area", etc.
+  if (locationVariants.length > 0) {
+    for (const variant of allVariants) {
+      for (const prefix of seniorityPrefixes) {
+        for (const locV of locationVariants) {
+          add(SITE + " \"" + prefix + variant + "\" \"" + locV + "\"", "role");
+        }
+      }
+    }
   }
 
-  // ── TIER C: AI-generated role queries for synonym coverage ──
+  // ── SECONDARY: Title only (no company, no location) — global reach ──────────
+  // Catches strong candidates regardless of where they're listed.
+  for (const variant of allVariants) {
+    for (const prefix of seniorityPrefixes.slice(0, 3)) {
+      add(SITE + " \"" + prefix + variant + "\"", "role");
+    }
+  }
+
+  // ── TERTIARY: Title × top companies — only the very best companies ──────────
+  // A light sweep of elite companies to ensure we don't miss obvious top talent.
+  const topCompanies = companies.slice(0, 40);
+  for (const variant of allVariants.slice(0, 6)) {
+    for (const company of topCompanies) {
+      add(SITE + " \"" + company + "\" \"" + variant + "\"", "company");
+    }
+  }
+
+  return queries.slice(0, opts.totalQueries);
+}
+
+// ── AI company evaluator ────────────────────────────────────────────────────
+// Uses a cheap model to judge whether each (unknown) company is a good startup.
+// Returns a map of companyName(lowercase) → { tier, rating(0-10), note }.
+async function aiEvaluateCompanies(
+  companyNames: string[],
+): Promise<Map<string, { rating: number; label: string; note: string }>> {
+  const result = new Map<string, { rating: number; label: string; note: string }>();
+  if (companyNames.length === 0) return result;
+
+  // De-dupe and cap to keep the prompt cheap
+  const unique = Array.from(new Set(companyNames.map((c) => c.trim()).filter(Boolean))).slice(0, 60);
+  if (unique.length === 0) return result;
+
   try {
-    const companySample = companies.slice(0, 20).join(", ");
     const res = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -107,34 +157,43 @@ async function generateTalentQueries(opts: {
         Authorization: "Bearer " + (process.env.AI_GATEWAY_API_KEY ?? ""),
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: "gpt-4o-mini", // cheap model for company evaluation
         messages: [
           {
             role: "system",
             content:
-              "You are an expert LinkedIn talent sourcer. " +
-              "Generate LinkedIn search queries using role title synonyms. " +
-              "Format: site:linkedin.com/in/ \"Title Synonym\" " +
-              "or site:linkedin.com/in/ \"Company\" \"Title Synonym\". " +
-              "Return ONLY raw queries, one per line. No numbering.",
+              "You are a startup/tech-company analyst. For each company name, judge how impressive it is " +
+              "as a place to work for a top engineer, based on your knowledge (funding, prestige, growth, talent bar). " +
+              "rating: 0-10 (10 = elite like OpenAI/Stripe/Palantir, 7-9 = strong well-funded startup or big tech, " +
+              "4-6 = decent/mid startup, 1-3 = unknown/weak, 0 = not a real company). " +
+              "label: one of \"Elite\", \"Strong\", \"Decent\", \"Weak\", \"Unknown\". " +
+              "note: max 6 words. " +
+              "Return ONLY a JSON array: [{\"company\": \"Name\", \"rating\": N, \"label\": \"...\", \"note\": \"...\"}]",
           },
-          { role: "user", content: buildPromptQueryGen(role, location, companySample) },
+          { role: "user", content: "Companies:\n" + unique.map((c, i) => (i + 1) + ". " + c).join("\n") },
         ],
-        temperature: 0.8,
-        max_tokens: 1500,
+        temperature: 0.2,
+        max_tokens: 2000,
       }),
     });
-    if (res.ok) {
-      const data = (await res.json()) as { choices: Array<{ message: { content: string } }> };
-      const text = data.choices[0]?.message?.content ?? "";
-      for (const line of text.split("\n")) {
-        const q = line.trim().replace(/^\d+\.\s*/, "");
-        if (q.toLowerCase().startsWith("site:linkedin.com/in/")) add(q, "role");
+    if (!res.ok) return result;
+    const data = (await res.json()) as { choices: Array<{ message: { content: string } }> };
+    const text = data.choices[0]?.message?.content ?? "";
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) return result;
+    const parsed = JSON.parse(jsonMatch[0]) as Array<{ company: string; rating: number; label: string; note: string }>;
+    for (const p of parsed) {
+      if (p.company) {
+        result.set(p.company.toLowerCase().trim(), {
+          rating: Math.max(0, Math.min(10, Number(p.rating) || 0)),
+          label: p.label || "Unknown",
+          note: p.note || "",
+        });
       }
     }
-  } catch { /* bonus */ }
+  } catch { /* fall back to heuristic scoring */ }
 
-  return queries.slice(0, opts.totalQueries);
+  return result;
 }
 
 // ── AI re-ranker ──────────────────────────────────────────────────────────────
@@ -241,21 +300,60 @@ export async function POST(req: NextRequest) {
         const tieredCos = getCompaniesByTier(tiers as CompanyTier[]);
         const companyNames = tieredCos.map((c) => c.name);
 
-        send({ type: "status", message: "Generating queries for " + companyNames.length + " companies (" + tiers.join("/") + ")..." });
+        // ── Step 1: Fetch AI synonyms first ──────────────────────────────────────
+        // Used both to generate diverse queries AND to filter results after collection.
+        send({ type: "status", message: "Expanding role synonyms..." });
+        let aiSynonyms: string[] = [];
+        try {
+          const synRes = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: "Bearer " + (process.env.AI_GATEWAY_API_KEY ?? ""),
+            },
+            body: JSON.stringify({
+              model: "gpt-4o-mini",
+              messages: [
+                {
+                  role: "system",
+                  content:
+                    "You are a LinkedIn recruiter expert. " +
+                    "Return every possible LinkedIn title variation for the given role — " +
+                    "abbreviations, seniority prefixes (Senior/Sr/Staff/Lead/Principal/Head/Director), " +
+                    "alternate phrasings, and closely related roles that are essentially the same job. " +
+                    "Return ONLY a flat JSON array of lowercase strings. No markdown, no explanation. Be very comprehensive.",
+                },
+                { role: "user", content: buildPromptSynonyms(role) },
+              ],
+              temperature: 0.2,
+              max_tokens: 600,
+            }),
+          });
+          if (synRes.ok) {
+            const synData = (await synRes.json()) as { choices: Array<{ message: { content: string } }> };
+            const raw = synData.choices[0]?.message?.content?.trim() ?? "[]";
+            const clean = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "").trim();
+            const parsed = JSON.parse(clean);
+            if (Array.isArray(parsed)) {
+              aiSynonyms = parsed.map((s: unknown) => String(s).toLowerCase()).filter(Boolean);
+            }
+          }
+        } catch { /* use static synonyms from normaliseRole */ }
 
+        // ── Step 2: Generate queries using synonyms ───────────────────────────
+        send({ type: "status", message: "Generating queries for " + companyNames.length + " companies..." });
         const queryList = await generateTalentQueries({
           role,
           location,
           companies: companyNames,
           totalQueries: queriesTotal,
+          roleSynonyms: aiSynonyms,
         });
-
-        send({ type: "status", message: "Running " + queryList.length + " searches (" + companyNames.length + " companies)...", queriesTotal: queryList.length });
 
         // ── Phase 1: COLLECT — no filtering during collection ──
         // Company queries paginate up to 10 pages (200 results each) = thousands of profiles.
         // Role queries paginate 2 pages max — used to catch people at unlisted companies.
-        // The scorer filters by role relevance AFTER collection.
+        // titleMatchesRole filters by role relevance before scoring (in both partials and final).
         const allRaw: Array<{ title: string; company: string; linkedinUrl: string; snippet: string }> = [];
         const seenUrls = new Set<string>();
         let lastPartialAt = 0;
@@ -266,10 +364,11 @@ export async function POST(req: NextRequest) {
 
           let results;
           try {
-            // Company queries: full 10-page pagination (up to 200 results each)
-            // Role queries: 2 pages max (role-phrase results are usually exhausted quickly)
+            // Role+company queries: 2 pages (up to 40 results, all role-relevant)
+            // Role-only queries: 2 pages (global sweep)
+            // Both types now have the role in the query so results are pre-filtered by Brave.
             results = await searchBraveDeep(q, braveKey, {
-              maxPages: qType === "company" ? 10 : 2,
+              maxPages: 2,
               delayMs: 700,
             });
           } catch {
@@ -288,11 +387,11 @@ export async function POST(req: NextRequest) {
           if (allRaw.length > prevCount) {
             send({ type: "progress", queriesDone: qi + 1, queriesTotal: queryList.length, profilesFound: allRaw.length });
 
-            // Every 30 new profiles, score what we have and stream a partial snapshot
-            // so the UI can show a live table and allow CSV download during the search.
+            // Every 30 new profiles, filter + score what we have and stream a partial snapshot.
             if (allRaw.length - lastPartialAt >= 30) {
               lastPartialAt = allRaw.length;
-              const partialScored = allRaw.map((p) =>
+              const partialFiltered = allRaw.filter((p) => titleMatchesRole(p.title, role, aiSynonyms));
+              const partialScored = partialFiltered.map((p) =>
                 scoreProfile(p, { role, location, preferredTiers: tiers as CompanyTier[] }),
               );
               const partialRanked = rankProfiles(partialScored).slice(0, 200);
@@ -305,43 +404,7 @@ export async function POST(req: NextRequest) {
 
         send({ type: "status", message: "Collected " + allRaw.length + " raw profiles. Filtering by role..." });
 
-        // ── Phase 2: AI synonym expansion (once, after collection) ──
-        let aiSynonyms: string[] = [];
-        try {
-          const synRes = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: "Bearer " + (process.env.AI_GATEWAY_API_KEY ?? ""),
-            },
-            body: JSON.stringify({
-              model: "gpt-4o-mini",
-              messages: [
-                {
-                  role: "system",
-                  content:
-                    "You are a LinkedIn recruiter expert. " +
-                    "Return every possible LinkedIn title variation for the given role. " +
-                    "Return ONLY a flat JSON array of lowercase strings. No markdown, no explanation.",
-                },
-                { role: "user", content: buildPromptSynonyms(role) },
-              ],
-              temperature: 0.2,
-              max_tokens: 600,
-            }),
-          });
-          if (synRes.ok) {
-            const synData = (await synRes.json()) as { choices: Array<{ message: { content: string } }> };
-            const raw = synData.choices[0]?.message?.content?.trim() ?? "[]";
-            const clean = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "").trim();
-            const parsed = JSON.parse(clean);
-            if (Array.isArray(parsed)) {
-              aiSynonyms = parsed.map((s: unknown) => String(s).toLowerCase()).filter(Boolean);
-            }
-          }
-        } catch { /* use static synonyms */ }
-
-        // ── Phase 3: FILTER by role title ──
+        // ── Phase 2: FILTER by role title (aiSynonyms already computed above) ──
         const filtered = allRaw.filter((p) => titleMatchesRole(p.title, role, aiSynonyms));
 
         send({ type: "status", message: filtered.length + " role-matched profiles. Scoring..." });
@@ -351,6 +414,36 @@ export async function POST(req: NextRequest) {
           scoreProfile(p, { role, location, preferredTiers: tiers as CompanyTier[] }),
         );
         let ranked = rankProfiles(scored);
+
+        // ── Phase 4b: AI company evaluation (cheap model) ──
+        // For the top candidates, evaluate whether their CURRENT company is a good
+        // startup/employer and adjust scores. This is the key signal now that we
+        // filter by location+title rather than by a fixed company list.
+        send({ type: "status", message: "AI evaluating companies of top candidates..." });
+        const topForCompanyEval = ranked.slice(0, 120);
+        const companyEval = await aiEvaluateCompanies(topForCompanyEval.map((p) => p.company));
+        if (companyEval.size > 0) {
+          ranked = ranked.map((p) => {
+            const evalResult = companyEval.get((p.company || "").toLowerCase().trim());
+            if (!evalResult) return p;
+            // Map rating 0-10 to a score delta of -10..+20
+            const delta = Math.round((evalResult.rating - 4) * 3);
+            const newTier =
+              evalResult.rating >= 9 ? "S" :
+              evalResult.rating >= 7 ? "A" :
+              evalResult.rating >= 4 ? "Unknown" : p.companyTier;
+            return {
+              ...p,
+              score: Math.max(0, Math.min(100, p.score + delta)),
+              companyTier: (p.companyTier && p.companyTier !== "Unknown") ? p.companyTier : (newTier as typeof p.companyTier),
+              startupSignals: evalResult.note
+                ? Array.from(new Set([...(p.startupSignals ?? []), evalResult.label + ": " + evalResult.note]))
+                : p.startupSignals,
+              matchReasons: [...p.matchReasons, "Company (AI): " + evalResult.label + " (" + evalResult.rating + "/10)"],
+            };
+          });
+          ranked.sort((a, b) => b.score - a.score);
+        }
 
         send({ type: "status", message: "AI re-ranking top " + Math.min(ranked.length, 30) + " profiles..." });
 
