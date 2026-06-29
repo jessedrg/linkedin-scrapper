@@ -10,7 +10,8 @@
  */
 
 import { type NextRequest } from "next/server";
-import { searchDeep, getSearchProvider } from "@/lib/scraper/search";
+import { searchDeep, getSearchProvider, hasPDL } from "@/lib/scraper/search";
+import { searchPDLDeep, pdlToSearchResult } from "@/lib/scraper/pdl";
 import {
   scoreProfile,
   rankProfiles,
@@ -342,7 +343,7 @@ async function aiRerank(opts: {
   }
 }
 
-// ─��� Route handler ─────────────────────────────────────────────────────────────
+// ─����� Route handler ─────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
@@ -365,8 +366,9 @@ export async function POST(req: NextRequest) {
   }
 
   const provider = getSearchProvider();
-  if (!provider) {
-    return new Response(JSON.stringify({ error: "No search provider set (add SERPER_API_KEY or BRAVE_API_KEY)" }), { status: 500 });
+  // Allow PDL-only mode: if PDL_API_KEY is set we don't need a SERP key
+  if (!provider && !hasPDL()) {
+    return new Response(JSON.stringify({ error: "No search provider set (add PDL_API_KEY, SERPER_API_KEY, or BRAVE_API_KEY)" }), { status: 500 });
   }
 
   // Create talent_search record
@@ -432,75 +434,114 @@ export async function POST(req: NextRequest) {
           }
         } catch { /* use static synonyms from normaliseRole */ }
 
-        // ── Step 2: Generate queries using synonyms ───────────────────────────
-        send({ type: "status", message: "Generating queries for " + companyNames.length + " companies..." });
-        const queryList = await generateTalentQueries({
-          role,
-          location,
-          companies: companyNames,
-          totalQueries: queriesTotal,
-          roleSynonyms: aiSynonyms,
-        });
-
-        // ── Phase 1: COLLECT — no filtering during collection ──
-        // Company queries paginate up to 10 pages (200 results each) = thousands of profiles.
-        // Role queries paginate 2 pages max — used to catch people at unlisted companies.
-        // titleMatchesRole filters by role relevance before scoring (in both partials and final).
-        const allRaw: Array<{ title: string; company: string; linkedinUrl: string; snippet: string }> = [];
+        // ── Phase 1: COLLECT profiles ─────────────────────────────────────────────
+        // Two paths: PDL (structured DB search) or SERP (Google/Brave scraping).
+        const allRaw: Array<{ title: string; company: string; linkedinUrl: string; snippet: string; name?: string; location?: string }> = [];
         const seenUrls = new Set<string>();
-        let lastPartialAt = 0;
 
-        for (let qi = 0; qi < queryList.length; qi++) {
-          const { query: q, type: qType } = queryList[qi];
-          send({ type: "progress", queriesDone: qi, queriesTotal: queryList.length, profilesFound: allRaw.length });
+        const pdlKey = process.env.PDL_API_KEY;
 
-          let results;
-          try {
-            // Provider-agnostic: Serper (Google, 100/page) when SERPER_API_KEY is set,
-            // otherwise Brave (20/page). Each query has the role pre-filtered by the engine.
-            results = await searchDeep(q, {
-              // Iterate pages until empty (no hard page cap for Serper — stops naturally)
-              maxPages: provider === "serper" ? 100 : 10,
-              delayMs: provider === "serper" ? 300 : 700,
-              // "past hour" filter: Google only returns recently updated LinkedIn profiles.
-              // This dramatically reduces total results per query, so exhaustive pagination
-              // terminates quickly (like page 55 in the playground) instead of running forever.
-              tbs: provider === "serper" ? "qdr:h" : undefined,
-            });
-          } catch {
-            await new Promise((r) => setTimeout(r, 2000));
-            continue;
-          }
+        if (pdlKey && hasPDL()) {
+          // ── PDL PATH: native structured search — no scraping, no SERP ────────
+          // PDL returns structured profiles directly filtered by title + location.
+          // This is far more accurate than SERP since PDL has 3B+ professional records.
+          send({ type: "status", message: "Searching People Data Labs database..." });
+          send({ type: "progress", queriesDone: 0, queriesTotal: 3, profilesFound: 0 });
 
-          const prevCount = allRaw.length;
-          for (const r of results) {
-            const url = r.link.split("?")[0];
-            if (seenUrls.has(url)) continue;
-            seenUrls.add(url);
-            const company = extractCompanyFromResult(r.title, r.snippet);
-            allRaw.push({ title: r.title, company, linkedinUrl: url, snippet: r.snippet });
-          }
-          if (allRaw.length > prevCount) {
-            send({ type: "progress", queriesDone: qi + 1, queriesTotal: queryList.length, profilesFound: allRaw.length });
+          // Run 3 PDL searches: with location+title, title-only global, with top companies
+          const pdlSearches = [
+            { titleVariants: [role, ...aiSynonyms.slice(0, 10)], location, companies: undefined },
+            { titleVariants: [role, ...aiSynonyms.slice(0, 10)], location: undefined, companies: undefined },
+            { titleVariants: [role, ...aiSynonyms.slice(0, 10)], location, companies: companyNames.slice(0, 20) },
+          ];
 
-            // Every 30 new profiles, filter + score what we have and stream a partial snapshot.
-            if (allRaw.length - lastPartialAt >= 30) {
-              lastPartialAt = allRaw.length;
-              const partialFiltered = allRaw.filter((p) => titleMatchesRole(p.title, role, aiSynonyms));
-              const partialScored = partialFiltered.map((p) =>
-                scoreProfile(p, { role, location, preferredTiers: tiers as CompanyTier[] }),
-              );
-              const partialRanked = rankProfiles(partialScored).slice(0, 200);
-              send({ type: "partial", profiles: partialRanked, total: partialRanked.length });
+          for (let si = 0; si < pdlSearches.length; si++) {
+            const searchOpts = pdlSearches[si];
+            send({ type: "progress", queriesDone: si, queriesTotal: 3, profilesFound: allRaw.length });
+            try {
+              const pdlProfiles = await searchPDLDeep(pdlKey, searchOpts, 1000);
+              for (const p of pdlProfiles) {
+                const r = pdlToSearchResult(p);
+                const url = r.link.split("?")[0];
+                if (seenUrls.has(url)) continue;
+                seenUrls.add(url);
+                allRaw.push({ title: r.title, company: r.company, linkedinUrl: url, snippet: r.snippet, name: r.name, location: r.location });
+              }
+              send({ type: "progress", queriesDone: si + 1, queriesTotal: 3, profilesFound: allRaw.length });
+            } catch (err) {
+              const msg = String(err);
+              if (msg.includes("402")) {
+                send({ type: "status", message: "PDL: out of credits. Falling back to web search..." });
+                break;
+              }
+              if (msg.includes("401")) {
+                send({ type: "error", message: "PDL: invalid API key. Check PDL_API_KEY environment variable." });
+                controller.close();
+                return;
+              }
+              // Other errors — continue with next search
             }
           }
 
-          if (allRaw.length >= 50000) break;
+        } else {
+          // ── SERP PATH: Google/Brave scraping ────────────────────────────────
+          send({ type: "status", message: "Generating queries for " + companyNames.length + " companies..." });
+          const queryList = await generateTalentQueries({
+            role,
+            location,
+            companies: companyNames,
+            totalQueries: queriesTotal,
+            roleSynonyms: aiSynonyms,
+          });
+
+          let lastPartialAt = 0;
+
+          for (let qi = 0; qi < queryList.length; qi++) {
+            const { query: q } = queryList[qi];
+            send({ type: "progress", queriesDone: qi, queriesTotal: queryList.length, profilesFound: allRaw.length });
+
+            let results;
+            try {
+              results = await searchDeep(q, {
+                maxPages: provider === "serper" ? 10 : 10,
+                delayMs: provider === "serper" ? 300 : 700,
+              });
+            } catch {
+              await new Promise((r) => setTimeout(r, 2000));
+              continue;
+            }
+
+            const prevCount = allRaw.length;
+            for (const r of results) {
+              const url = r.link.split("?")[0];
+              if (seenUrls.has(url)) continue;
+              seenUrls.add(url);
+              const company = extractCompanyFromResult(r.title, r.snippet);
+              allRaw.push({ title: r.title, company, linkedinUrl: url, snippet: r.snippet });
+            }
+
+            if (allRaw.length > prevCount) {
+              send({ type: "progress", queriesDone: qi + 1, queriesTotal: queryList.length, profilesFound: allRaw.length });
+              if (allRaw.length - lastPartialAt >= 30) {
+                lastPartialAt = allRaw.length;
+                const partialFiltered = allRaw.filter((p) => titleMatchesRole(p.title, role, aiSynonyms));
+                const partialScored = partialFiltered.map((p) =>
+                  scoreProfile(p, { role, location, preferredTiers: tiers as CompanyTier[] }),
+                );
+                const partialRanked = rankProfiles(partialScored).slice(0, 200);
+                send({ type: "partial", profiles: partialRanked, total: partialRanked.length });
+              }
+            }
+
+            if (allRaw.length >= 50000) break;
+          }
         }
 
-        send({ type: "status", message: "Collected " + allRaw.length + " raw profiles. Filtering by role..." });
+        send({ type: "status", message: "Collected " + allRaw.length + " profiles. Filtering by role..." });
 
-        // ── Phase 2: FILTER by role title (aiSynonyms already computed above) ──
+        // ── Phase 2: FILTER by role title ─────────────────────────────────────
+        // PDL path: profiles are already role-filtered by the SQL query, so most pass.
+        // SERP path: broad queries may include tangential results.
         const filtered = allRaw.filter((p) => titleMatchesRole(p.title, role, aiSynonyms));
 
         send({ type: "status", message: filtered.length + " role-matched profiles. Scoring..." });

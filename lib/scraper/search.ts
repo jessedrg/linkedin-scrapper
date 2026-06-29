@@ -3,11 +3,16 @@ import { searchSerperDeep, type SerperTbs } from "./serper";
 
 export type { SearchResult };
 
-/** Returns which provider is configured. Serper is preferred (cheaper + better coverage). */
+/** Returns which SERP provider is configured (PDL is handled separately in the route). */
 export function getSearchProvider(): "serper" | "brave" | null {
   if (process.env.SERPER_API_KEY) return "serper";
   if (process.env.BRAVE_API_KEY) return "brave";
   return null;
+}
+
+/** Returns true when PDL is configured. PDL bypasses SERP entirely. */
+export function hasPDL(): boolean {
+  return Boolean(process.env.PDL_API_KEY);
 }
 
 /**
