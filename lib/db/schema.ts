@@ -48,6 +48,7 @@ export const profiles = pgTable("profiles", {
   companyTier: text("company_tier").notNull().default(""),
   location: text("location").notNull().default(""),
   matchReason: text("match_reason").notNull().default(""),
+  cluster: text("cluster").notNull().default(""),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 

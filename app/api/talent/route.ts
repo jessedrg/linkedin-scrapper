@@ -138,6 +138,85 @@ async function generateTalentQueries(opts: {
   return queries.slice(0, opts.totalQueries);
 }
 
+// ── Cluster profiles ─────────────────────────────────────────────────────────
+// Groups profiles into clusters based on (normalised role variant × location).
+// A cluster key is derived from the title + location so people doing the same
+// job in the same city end up together. Deduplication by linkedinUrl happens
+// across ALL clusters so a person can only appear once, in the best cluster.
+function clusterProfiles<T extends { title: string; location: string; linkedinUrl: string; score: number }>(
+  profiles: T[],
+  role: string,
+): Array<{ key: string; label: string; profiles: T[] }> {
+  const seen = new Set<string>();
+  const clusters = new Map<string, { label: string; profiles: T[] }>();
+
+  // Canonical role words for grouping variant titles
+  const roleWords = role.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+
+  const getKey = (p: T): string => {
+    const titleLower = (p.title ?? "").toLowerCase();
+    const locLower = (p.location ?? "").toLowerCase();
+
+    // Normalise location to metro area
+    let loc = "Global";
+    if (locLower.includes("san francisco") || locLower.includes("bay area") || locLower.includes("silicon valley")) loc = "San Francisco Bay Area";
+    else if (locLower.includes("new york") || locLower.includes("nyc")) loc = "New York";
+    else if (locLower.includes("london")) loc = "London";
+    else if (locLower.includes("los angeles") || locLower.includes(" la,")) loc = "Los Angeles";
+    else if (locLower.includes("seattle")) loc = "Seattle";
+    else if (locLower.includes("austin")) loc = "Austin";
+    else if (locLower.includes("boston")) loc = "Boston";
+    else if (locLower.includes("chicago")) loc = "Chicago";
+    else if (locLower.includes("berlin")) loc = "Berlin";
+    else if (locLower.includes("paris")) loc = "Paris";
+    else if (locLower.includes("toronto")) loc = "Toronto";
+    else if (locLower.includes("remote")) loc = "Remote";
+    else if (locLower) loc = p.location; // keep as-is if known
+
+    // Normalise title variant
+    let roleLabel = role; // default to searched role
+    if (titleLower.includes("senior") || titleLower.includes("sr.")) roleLabel = "Senior " + role;
+    else if (titleLower.includes("staff")) roleLabel = "Staff " + role;
+    else if (titleLower.includes("lead")) roleLabel = "Lead " + role;
+    else if (titleLower.includes("principal")) roleLabel = "Principal " + role;
+    else if (titleLower.includes("head of") || titleLower.includes("director")) roleLabel = "Head / Director";
+    // Check if title shares key words with role
+    const matchesRole = roleWords.some((w) => titleLower.includes(w));
+    if (!matchesRole) roleLabel = "Related Roles";
+
+    return `${roleLabel}||${loc}`;
+  };
+
+  for (const p of profiles) {
+    const url = p.linkedinUrl;
+    if (seen.has(url)) continue; // global dedup — each URL appears only once
+    seen.add(url);
+
+    const key = getKey(p);
+    if (!clusters.has(key)) {
+      const [roleLabel, loc] = key.split("||");
+      clusters.set(key, {
+        label: loc === "Global" ? roleLabel : `${roleLabel} — ${loc}`,
+        profiles: [],
+      });
+    }
+    clusters.get(key)!.profiles.push(p);
+  }
+
+  // Sort clusters by total score desc, then sort profiles within each cluster
+  return Array.from(clusters.entries())
+    .map(([key, c]) => ({
+      key,
+      label: c.label,
+      profiles: c.profiles.sort((a, b) => b.score - a.score),
+    }))
+    .sort((a, b) => {
+      const scoreA = a.profiles.reduce((s, p) => s + p.score, 0) / a.profiles.length;
+      const scoreB = b.profiles.reduce((s, p) => s + p.score, 0) / b.profiles.length;
+      return scoreB - scoreA;
+    });
+}
+
 // ── AI company evaluator ────────────────────────────────────────────────────
 // Uses a cheap model to judge whether each (unknown) company is a good startup.
 // Returns a map of companyName(lowercase) → { tier, rating(0-10), note }.
@@ -466,8 +545,26 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // ── Phase 6: PERSIST top 500 ──
-        const toSave = ranked.slice(0, 500);
+        // ── Phase 6: CLUSTER + PERSIST top 500 ──
+        // Cluster by (role variant × location), deduplicate URLs globally.
+        const clusters = clusterProfiles(ranked, role);
+        // Flatten maintaining cluster label, still globally deduped by clusterProfiles.
+        const toSave: Array<typeof ranked[0] & { cluster: string }> = [];
+        const globalSeen = new Set<string>();
+        for (const c of clusters) {
+          for (const p of c.profiles) {
+            if (!globalSeen.has(p.linkedinUrl)) {
+              globalSeen.add(p.linkedinUrl);
+              toSave.push({ ...p, cluster: c.label });
+              if (toSave.length >= 500) break;
+            }
+          }
+          if (toSave.length >= 500) break;
+        }
+
+        // Send clusters info as part of done event
+        const clustersSummary = clusters.map((c) => ({ key: c.key, label: c.label, count: c.profiles.length }));
+
         for (const p of toSave) {
           try {
             const fullName = p.name || p.title.split(" - ")[0] || "Unknown";
@@ -483,6 +580,7 @@ export async function POST(req: NextRequest) {
               companyTier: p.companyTier ?? "",
               location: p.location,
               matchReason: p.matchReasons.join(" | "),
+              cluster: p.cluster,
             }).onConflictDoNothing();
           } catch { /* ignore dupe */ }
         }
@@ -492,7 +590,7 @@ export async function POST(req: NextRequest) {
           .set({ status: "completed", profilesFound: ranked.length, finishedAt: new Date() })
           .where(eq(talentSearches.id, tsId));
 
-        send({ type: "done", searchId: tsId, total: ranked.length, profiles: ranked.slice(0, 200) });
+        send({ type: "done", searchId: tsId, total: ranked.length, profiles: ranked.slice(0, 200), clusters: clustersSummary });
 
       } catch (err) {
         await db

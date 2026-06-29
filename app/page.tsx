@@ -74,7 +74,10 @@ interface TalentProfile {
   startupSignals: string[];
   matchReasons: string[];
   snippet: string;
+  cluster?: string;
 }
+
+interface ClusterSummary { key: string; label: string; count: number; }
 
 interface TalentEvent {
   type: "status" | "progress" | "partial" | "done" | "error";
@@ -85,6 +88,7 @@ interface TalentEvent {
   profiles?: TalentProfile[];
   total?: number;
   searchId?: number;
+  clusters?: ClusterSummary[];
 }
 
 // ── Main App ───────────────────────────────────────────────────
@@ -1014,6 +1018,9 @@ function TalentView() {
   const [statusMsg, setStatusMsg] = useState("");
   const [progress, setProgress] = useState({ done: 0, total: 0, found: 0 });
   const [results, setResults] = useState<TalentProfile[]>([]);
+  const [clusters, setClusters] = useState<ClusterSummary[]>([]);
+  const [viewMode, setViewMode] = useState<"list" | "clusters">("list");
+  const [activeCluster, setActiveCluster] = useState<string | null>(null);
   const [filterTier, setFilterTier] = useState<CompanyTier | "all">("all");
   const [minScore, setMinScore] = useState(0);
   const [showFilters, setShowFilters] = useState(false);
@@ -1027,6 +1034,8 @@ function TalentView() {
     if (!role.trim() || running) return;
     setRunning(true);
     setResults([]);
+    setClusters([]);
+    setActiveCluster(null);
     setStatusMsg("Initialising...");
     setProgress({ done: 0, total: 0, found: 0 });
     setExpandedIdx(null);
@@ -1075,6 +1084,7 @@ function TalentView() {
             }
             if (evt.type === "done") {
               setResults(evt.profiles ?? []);
+              if (evt.clusters && evt.clusters.length > 0) setClusters(evt.clusters);
               setStatusMsg(`Done — ${evt.total ?? 0} profiles ranked`);
               setRunning(false);
             }
