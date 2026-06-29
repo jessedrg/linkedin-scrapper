@@ -68,9 +68,45 @@ export function normaliseLocation(raw: string): string {
 /** Extract location text from a Brave result snippet / title */
 export function extractLocation(title: string, snippet: string): string {
   const combined = `${title} ${snippet}`;
-  // LinkedIn titles often look like "John Smith - Software Engineer at Stripe · San Francisco Bay Area"
-  const locMatch = combined.match(/[·|–-]\s*([A-Za-z\s,]+(?:Area|Bay|City|York|Angeles|Francisco|Remote|London|Berlin|Paris|Toronto))/i);
-  if (locMatch) return normaliseLocation(locMatch[1].trim());
+
+  // Pattern 1: after · separator — most common LinkedIn format
+  // e.g. "John Smith - Engineer at Palantir · San Francisco Bay Area"
+  const bulletMatch = combined.match(/[·•]\s*([A-Za-z][A-Za-z\s,]{2,40}?)(?:\s*[-–|·]|\s*$)/);
+  if (bulletMatch) {
+    const candidate = bulletMatch[1].trim().replace(/\.$/, "");
+    const norm = normaliseLocation(candidate);
+    if (norm !== candidate || LOCATION_ALIASES.some(({ pattern }) => pattern.test(candidate))) {
+      return norm;
+    }
+  }
+
+  // Pattern 2: "City, State" or "City, Country" after a comma
+  // e.g. "San Francisco, CA" / "Austin, Texas" / "New York, NY"
+  const cityStateMatch = combined.match(/([A-Z][a-z]+(?:\s[A-Z][a-z]+)*),\s*([A-Z]{2}|[A-Z][a-z]+)/);
+  if (cityStateMatch) {
+    const candidate = cityStateMatch[1] + ", " + cityStateMatch[2];
+    const norm = normaliseLocation(candidate);
+    if (norm !== candidate || normaliseLocation(cityStateMatch[1]) !== cityStateMatch[1]) {
+      return normaliseLocation(cityStateMatch[1]);
+    }
+  }
+
+  // Pattern 3: direct scan for known city names anywhere in combined text
+  const knownCities = [
+    "San Francisco", "Bay Area", "Silicon Valley", "Palo Alto", "Mountain View", "Menlo Park",
+    "New York", "NYC", "Brooklyn", "Manhattan",
+    "Los Angeles", "Santa Monica",
+    "Seattle", "Bellevue", "Redmond",
+    "Austin", "Boston", "Chicago", "Miami", "Denver", "Atlanta",
+    "London", "Berlin", "Paris", "Toronto", "Amsterdam", "Singapore",
+    "Remote",
+  ];
+  for (const city of knownCities) {
+    if (combined.toLowerCase().includes(city.toLowerCase())) {
+      return normaliseLocation(city);
+    }
+  }
+
   // Check snippet for city names
   for (const { pattern, canonical } of LOCATION_ALIASES) {
     if (pattern.test(combined)) return canonical;
@@ -306,11 +342,15 @@ export function scoreProfile(
       normTarget.toLowerCase().includes(extractedLoc.toLowerCase()));
 
   if (locationMatch) {
-    score += 12;
-    reasons.push(`Location match (${extractedLoc}): +12`);
+    score += 20;
+    reasons.push(`Location match (${extractedLoc}): +20`);
   } else if (extractedLoc.toLowerCase() === "remote") {
-    score += 4;
-    reasons.push("Remote: +4");
+    score += 6;
+    reasons.push("Remote: +6");
+  } else if (extractedLoc) {
+    // Known location but different city — small penalty so local candidates rank higher
+    score -= 5;
+    reasons.push(`Different location (${extractedLoc}): -5`);
   }
 
   // 5. LinkedIn profile quality heuristics (profile completeness signals)
