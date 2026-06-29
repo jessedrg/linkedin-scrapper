@@ -1,4 +1,4 @@
-import { searchBraveDeep, type SearchResult } from "./brave";
+import { searchDeep, getSearchProvider, type SearchResult } from "./search";
 import { generateQueries, generateAIQueries } from "./query-engine";
 import {
   upsertProfile, profileUrlExists,
@@ -41,8 +41,8 @@ export async function runScrape(opts: {
   useAI?: boolean;
   onProgress?: (p: ScrapeProgress) => void;
 }): Promise<ScrapeProgress> {
-  const braveKey = process.env.BRAVE_API_KEY || "";
-  if (!braveKey) throw new Error("BRAVE_API_KEY not set");
+  const provider = getSearchProvider();
+  if (!provider) throw new Error("No search provider set (add SERPER_API_KEY or BRAVE_API_KEY)");
 
   const companiesList = opts.companies;
   const deep = opts.deep ?? true;
@@ -122,9 +122,9 @@ export async function runScrape(opts: {
 
         let results: SearchResult[] = [];
         try {
-          results = await searchBraveDeep(query, braveKey, {
+          results = await searchDeep(query, {
             maxPages: 2,
-            delayMs: 1100,
+            delayMs: provider === "serper" ? 300 : 1100,
           });
         } catch {
           await new Promise((r) => setTimeout(r, 3000));

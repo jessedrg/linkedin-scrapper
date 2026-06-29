@@ -17,8 +17,8 @@ export async function POST(req: NextRequest) {
     useAI,
   } = body;
 
-  if (!process.env.BRAVE_API_KEY)
-    return NextResponse.json({ error: "BRAVE_API_KEY not configured" }, { status: 500 });
+  if (!process.env.SERPER_API_KEY && !process.env.BRAVE_API_KEY)
+    return NextResponse.json({ error: "No search provider configured (add SERPER_API_KEY or BRAVE_API_KEY)" }, { status: 500 });
 
   let companies: string[] = companiesOverride ?? [];
   if (companies.length === 0) {
