@@ -342,7 +342,7 @@ async function aiRerank(opts: {
   }
 }
 
-// ── Route handler ─────────────────────────────────────────────────────────────
+// ─��� Route handler ─────────────────────────────────────────────────────────────
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
@@ -459,8 +459,13 @@ export async function POST(req: NextRequest) {
             // Provider-agnostic: Serper (Google, 100/page) when SERPER_API_KEY is set,
             // otherwise Brave (20/page). Each query has the role pre-filtered by the engine.
             results = await searchDeep(q, {
-              maxPages: 2,
+              // Iterate pages until empty (no hard page cap for Serper — stops naturally)
+              maxPages: provider === "serper" ? 100 : 10,
               delayMs: provider === "serper" ? 300 : 700,
+              // "past hour" filter: Google only returns recently updated LinkedIn profiles.
+              // This dramatically reduces total results per query, so exhaustive pagination
+              // terminates quickly (like page 55 in the playground) instead of running forever.
+              tbs: provider === "serper" ? "qdr:h" : undefined,
             });
           } catch {
             await new Promise((r) => setTimeout(r, 2000));

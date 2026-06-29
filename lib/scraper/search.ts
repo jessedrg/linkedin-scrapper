@@ -1,5 +1,5 @@
 import { searchBraveDeep, type SearchResult } from "./brave";
-import { searchSerperDeep } from "./serper";
+import { searchSerperDeep, type SerperTbs } from "./serper";
 
 export type { SearchResult };
 
@@ -17,13 +17,15 @@ export function getSearchProvider(): "serper" | "brave" | null {
  */
 export async function searchDeep(
   query: string,
-  opts: { maxPages?: number; delayMs?: number } = {},
+  opts: { maxPages?: number; delayMs?: number; tbs?: SerperTbs } = {},
 ): Promise<SearchResult[]> {
   const serperKey = process.env.SERPER_API_KEY;
   if (serperKey) {
-    // Serper returns up to 100 results/page vs Brave's 20/page.
-    // Pass maxPages directly — serperDeep defaults to 2 pages (200 results/query).
-    return searchSerperDeep(query, serperKey, { maxPages: opts.maxPages ?? 2, delayMs: opts.delayMs ?? 300 });
+    return searchSerperDeep(query, serperKey, {
+      maxPages: opts.maxPages ?? 10,
+      delayMs: opts.delayMs ?? 300,
+      tbs: opts.tbs,
+    });
   }
 
   const braveKey = process.env.BRAVE_API_KEY;

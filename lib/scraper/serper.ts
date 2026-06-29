@@ -12,39 +12,46 @@ interface SerperResponse {
   searchInformation?: { totalResults?: string };
 }
 
+// tbs values for Serper date-range filter (matches Serper playground "Date range" param)
+export type SerperTbs =
+  | "qdr:h"   // past hour
+  | "qdr:d"   // past 24 hours
+  | "qdr:w"   // past week
+  | "qdr:m"   // past month
+  | "qdr:y"   // past year
+  | "";       // any time (default — no filter)
+
 /**
- * Single Serper.dev (Google) search page.
- * `page` is 1-indexed (page 1 = first 100 results). num max is 100.
- * Returns only linkedin.com/in/ profile results, normalized to SearchResult.
+ * Single Serper.dev page. Returns { results, totalOnPage }.
+ * totalOnPage = raw organic count (not filtered LinkedIn count) — used to detect last page.
  */
-// Returns { results, totalOnPage } so the deep function can decide whether to paginate
-// without using the filtered LinkedIn count as a proxy for "page exhausted".
 export async function searchSerper(
   query: string,
   apiKey: string,
   page = 1,
   num = 100,
+  tbs: SerperTbs = "",
 ): Promise<{ results: SearchResult[]; totalOnPage: number }> {
+  const body: Record<string, unknown> = {
+    q: query.slice(0, 400),
+    num: Math.min(num, 100),
+    page,
+    gl: "us",
+    hl: "en",
+  };
+  if (tbs) body.tbs = tbs;
+
   const res = await fetch(SERPER_URL, {
     method: "POST",
-    headers: {
-      "X-API-KEY": apiKey,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      q: query.slice(0, 400),
-      num: Math.min(num, 100),
-      page,
-      gl: "us",   // country — matches Serper playground default
-      hl: "en",   // language — returns English LinkedIn profiles
-    }),
+    headers: { "X-API-KEY": apiKey, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 
   if (!res.ok) {
     if (res.status === 429) { await new Promise((r) => setTimeout(r, 3000)); return { results: [], totalOnPage: 0 }; }
     if (res.status === 400) return { results: [], totalOnPage: 0 };
-    const body = await res.text();
-    throw new Error(`Serper API ${res.status}: ${body.slice(0, 200)}`);
+    const text = await res.text();
+    throw new Error(`Serper ${res.status}: ${text.slice(0, 200)}`);
   }
 
   const data = (await res.json()) as SerperResponse;
@@ -52,31 +59,28 @@ export async function searchSerper(
   const results: SearchResult[] = [];
 
   for (const r of organic) {
-    if (r.link && r.link.includes("linkedin.com/in/")) {
-      results.push({
-        title: r.title ?? "",
-        link: r.link.split("?")[0],
-        snippet: r.snippet ?? "",
-      });
+    if (r.link?.includes("linkedin.com/in/")) {
+      results.push({ title: r.title ?? "", link: r.link.split("?")[0], snippet: r.snippet ?? "" });
     }
   }
 
-  // totalOnPage = actual results Google returned (not filtered LinkedIn count).
-  // If < num, this was the last page of results.
   return { results, totalOnPage: organic.length };
 }
 
 /**
- * Deep paginated Serper search. Each page returns up to 100 results (vs Brave's 20),
- * so far fewer requests are needed to collect the same volume.
+ * Exhaustive paginated Serper search.
+ * Iterates pages until Google returns an empty page (like the playground does at page 55+).
+ * Hard cap at maxPages to control cost. With tbs="qdr:h" (past hour) there are far fewer
+ * total results so pagination naturally terminates quickly.
  */
 export async function searchSerperDeep(
   query: string,
   apiKey: string,
-  opts: { maxPages?: number; delayMs?: number } = {},
+  opts: { maxPages?: number; delayMs?: number; tbs?: SerperTbs } = {},
 ): Promise<SearchResult[]> {
-  const maxPages = opts.maxPages ?? 2; // 2 pages × 100 = up to 200 results per query
+  const maxPages = opts.maxPages ?? 10; // iterate until empty, but hard-cap at 10 pages
   const delayMs = opts.delayMs ?? 300;
+  const tbs = opts.tbs ?? "";
   const out: SearchResult[] = [];
   const seen = new Set<string>();
 
@@ -85,12 +89,12 @@ export async function searchSerperDeep(
 
     let batch: { results: SearchResult[]; totalOnPage: number };
     try {
-      batch = await searchSerper(query, apiKey, page, 100);
+      batch = await searchSerper(query, apiKey, page, 100, tbs);
     } catch {
       break;
     }
 
-    // No results at all from Google — query is exhausted
+    // Google returned nothing — all pages exhausted (e.g. page 55 in playground)
     if (batch.totalOnPage === 0) break;
 
     for (const r of batch.results) {
@@ -98,7 +102,7 @@ export async function searchSerperDeep(
       if (!seen.has(u)) { seen.add(u); out.push(r); }
     }
 
-    // If Google returned fewer than the requested num, this was the last page
+    // Partial page = last page of results
     if (batch.totalOnPage < 100) break;
   }
 
