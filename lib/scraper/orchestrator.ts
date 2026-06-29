@@ -1,146 +1,176 @@
-import { searchBrave, type SearchResult } from "./brave";
-import { generateQueries, parseSearchIntent } from "./query-engine";
+import { searchBraveDeep, type SearchResult } from "./brave";
+import { generateQueries, generateAIQueries } from "./query-engine";
 import {
-  upsertProfile, profileExists, getProfileCount,
-  createSearch, updateSearch, isQueryUsed, recordQuery,
-} from "../db";
+  upsertProfile, profileUrlExists,
+  createSearch, updateSearch,
+  isQueryUsed, recordQuery,
+} from "../db/queries";
 
 export interface ScrapeProgress {
-  searchId: string;
+  searchId: number;
   profilesFound: number;
   queriesUsed: number;
   queriesTotal: number;
   currentQuery: string;
-  status: "running" | "completed" | "error" | "stopped";
+  currentCompany: string;
+  status: "running" | "completed" | "error";
 }
 
-// Global state for SSE streaming
-let _currentProgress: ScrapeProgress | null = null;
-let _listeners: ((p: ScrapeProgress) => void)[] = [];
-
-export function onProgress(fn: (p: ScrapeProgress) => void) {
-  _listeners.push(fn);
-  return () => { _listeners = _listeners.filter(l => l !== fn); };
-}
-
-export function getCurrentProgress(): ScrapeProgress | null {
-  return _currentProgress;
-}
-
-function emit(p: ScrapeProgress) {
-  _currentProgress = p;
-  for (const fn of _listeners) fn(p);
-}
-
-function parseResult(sr: SearchResult, query: string, searchId: string) {
+function parseResult(sr: SearchResult, company: string, query: string, searchId: number) {
   const titleParts = sr.title.replace(/\s*[|–-]\s*LinkedIn.*$/i, "").split(/\s*[|–-]\s*/);
   const name = titleParts[0]?.trim() || "Unknown";
-  const headline = titleParts.slice(1).join(" | ").trim();
-  const locMatch = sr.snippet.match(/(?:^|\.\s)([A-Z][a-záéíóúñ]+(?:[\s,]+[A-Z][a-záéíóúñ]+){0,3})/);
+  const title = titleParts.slice(1).join(" | ").trim() || null;
   return {
-    linkedin_url: sr.link.split("?")[0],
+    linkedinUrl: sr.link.split("?")[0],
     name,
-    headline,
-    location: locMatch?.[1]?.trim() || "",
-    snippet: sr.snippet,
-    score: scoreProfile(name, headline, sr.snippet),
-    source: "brave",
-    query,
-    search_id: searchId,
+    title,
+    company,
+    sourceQuery: query,
+    searchId,
   };
 }
 
-function scoreProfile(name: string, headline: string, snippet: string): number {
-  let score = 40;
-  const h = (headline + " " + snippet).toLowerCase();
-  // Boost for seniority
-  if (/\b(senior|sr\.?|staff|principal|lead|director|head)\b/i.test(h)) score += 10;
-  // Boost for engineering
-  if (/\b(engineer|developer|architect|sre|devops|swe)\b/i.test(h)) score += 8;
-  // Boost for known companies
-  if (/\b(google|meta|apple|amazon|microsoft|palantir|stripe|databricks|snowflake|openai|anthropic)\b/i.test(h)) score += 12;
-  if (/\b(coinbase|robinhood|ramp|brex|figma|notion|vercel|airbnb|uber|netflix)\b/i.test(h)) score += 10;
-  // Boost for forward deployed
-  if (/\b(forward deploy|fde|field engineer|solutions engineer)\b/i.test(h)) score += 15;
-  // Cap at 100
-  return Math.min(score, 100);
-}
-
 export async function runScrape(opts: {
-  prompt: string;
-  queries?: string[];
-  locations?: string[];
-  maxQueries?: number;
-  target?: number;
+  companies: string[];
+  role?: string;
+  queriesPerCompany?: number;
+  targetPerCompany?: number | null;
+  maxResultsPerQuery?: number;
   delayMs?: number;
+  deep?: boolean;
+  useAI?: boolean;
+  onProgress?: (p: ScrapeProgress) => void;
 }): Promise<ScrapeProgress> {
   const braveKey = process.env.BRAVE_API_KEY || "";
   if (!braveKey) throw new Error("BRAVE_API_KEY not set");
 
-  const searchId = crypto.randomUUID().slice(0, 8);
-  const target = opts.target ?? 1000;
-  const delayMs = opts.delayMs ?? 600;
+  const companiesList = opts.companies;
+  const deep = opts.deep ?? true;
+  const queriesPerCompany = opts.queriesPerCompany ?? (deep ? 150 : 30);
+  // null / 0 = no cap → grab every unique profile we can find per company
+  const targetPerCompany =
+    opts.targetPerCompany === null || opts.targetPerCompany === 0
+      ? Infinity
+      : opts.targetPerCompany ?? Infinity;
+  const maxResultsPerQuery = opts.maxResultsPerQuery ?? 120;
+  const delayMs = opts.delayMs ?? 300;
+  const useAI = opts.useAI ?? false;
 
-  // Use provided queries (from AI) or generate
-  const queries = opts.queries?.length
-    ? opts.queries
-    : generateQueries(opts.prompt, { maxQueries: opts.maxQueries ?? 600, locations: opts.locations });
+  // Pre-generate AI queries for all companies in one shot when enabled.
+  let aiQueriesByCompany = new Map<string, string[]>();
+  if (useAI && opts.role) {
+    try {
+      const ai = await generateAIQueries({
+        role: opts.role,
+        companies: companiesList,
+        maxQueriesPerCompany: Math.min(queriesPerCompany, 40),
+      });
+      aiQueriesByCompany = new Map(ai.map((a) => [a.company, a.queries]));
+    } catch {
+      // fall back silently to static queries
+    }
+  }
 
-  createSearch(searchId, opts.prompt, queries.length);
+  // Generate all queries upfront
+  const totalQueries = companiesList.length * queriesPerCompany;
+  const search = await createSearch({
+    companyCount: companiesList.length,
+    queriesGenerated: totalQueries,
+  });
+  const searchId = search.id;
 
-  const seenUrls = new Set<string>();
   let profilesFound = 0;
   let queriesUsed = 0;
+  const emit = (partial: Partial<ScrapeProgress> = {}) => {
+    opts.onProgress?.({
+      searchId,
+      profilesFound,
+      queriesUsed,
+      queriesTotal: totalQueries,
+      currentQuery: "",
+      currentCompany: "",
+      status: "running",
+      ...partial,
+    });
+  };
 
-  emit({ searchId, profilesFound: 0, queriesUsed: 0, queriesTotal: queries.length, currentQuery: "", status: "running" });
+  emit();
 
   try {
-    for (const query of queries) {
-      if (profilesFound >= target) break;
-      if (isQueryUsed(query, searchId)) continue;
-
-      let results: SearchResult[] = [];
-      try {
-        results = await searchBrave(query, braveKey, 0, 20);
-      } catch (err) {
-        await new Promise(r => setTimeout(r, 3000));
-        continue;
+    for (const company of companiesList) {
+      // Blend AI-generated queries with the expanded static matrix, dedup.
+      const staticQueries = generateQueries(company, {
+        maxQueries: queriesPerCompany,
+        role: opts.role,
+        deep,
+      });
+      const aiQueries = aiQueriesByCompany.get(company) ?? [];
+      const merged: string[] = [];
+      const seenQ = new Set<string>();
+      for (const q of [...aiQueries, ...staticQueries]) {
+        const key = q.toLowerCase().trim();
+        if (seenQ.has(key)) continue;
+        seenQ.add(key);
+        merged.push(q);
       }
+      const queries = merged.slice(0, queriesPerCompany);
+      let foundForCompany = 0;
 
-      queriesUsed++;
-      let newInBatch = 0;
+      for (const query of queries) {
+        if (foundForCompany >= targetPerCompany) break;
+        if (await isQueryUsed(query, searchId)) continue;
 
-      for (const sr of results) {
-        const url = sr.link.split("?")[0];
-        if (seenUrls.has(url) || profileExists(url)) continue;
-        seenUrls.add(url);
+        let results: SearchResult[] = [];
+        try {
+          results = await searchBraveDeep(query, braveKey, {
+            maxResults: maxResultsPerQuery,
+            delayMs: 1100,
+          });
+        } catch {
+          await new Promise((r) => setTimeout(r, 3000));
+          continue;
+        }
 
-        const profile = parseResult(sr, query, searchId);
-        if (profile.score >= 20) {
-          upsertProfile(profile);
+        queriesUsed++;
+        let newInBatch = 0;
+
+        for (const sr of results) {
+          const url = sr.link.split("?")[0];
+          if (await profileUrlExists(url)) continue;
+          const profile = parseResult(sr, company, query, searchId);
+          await upsertProfile(profile);
           profilesFound++;
+          foundForCompany++;
           newInBatch++;
         }
+
+        await recordQuery({ searchId, company, query, resultsCount: newInBatch });
+        await updateSearch(searchId, { profilesFound });
+        emit({ currentQuery: query, currentCompany: company });
+
+        await new Promise((r) => setTimeout(r, delayMs + Math.random() * delayMs * 0.5));
       }
-
-      recordQuery(query, searchId, newInBatch);
-
-      if (queriesUsed % 3 === 0 || newInBatch > 0) {
-        updateSearch(searchId, { queries_done: queriesUsed, profiles_found: profilesFound });
-        emit({ searchId, profilesFound, queriesUsed, queriesTotal: queries.length, currentQuery: query, status: "running" });
-      }
-
-      await new Promise(r => setTimeout(r, delayMs + Math.random() * delayMs * 0.5));
     }
 
-    updateSearch(searchId, { status: "completed", queries_done: queriesUsed, profiles_found: profilesFound, finished_at: new Date().toISOString() });
-    const final: ScrapeProgress = { searchId, profilesFound, queriesUsed, queriesTotal: queries.length, currentQuery: "", status: "completed" };
-    emit(final);
+    await updateSearch(searchId, {
+      status: "completed",
+      profilesFound,
+      finishedAt: new Date(),
+    });
+    const final: ScrapeProgress = {
+      searchId, profilesFound, queriesUsed, queriesTotal: totalQueries,
+      currentQuery: "", currentCompany: "", status: "completed",
+    };
+    opts.onProgress?.(final);
     return final;
   } catch (err) {
-    updateSearch(searchId, { status: "error", queries_done: queriesUsed, profiles_found: profilesFound });
-    const errProgress: ScrapeProgress = { searchId, profilesFound, queriesUsed, queriesTotal: queries.length, currentQuery: "", status: "error" };
-    emit(errProgress);
+    const message = err instanceof Error ? err.message : String(err);
+    await updateSearch(searchId, { status: "error", error: message, profilesFound });
+    const errProgress: ScrapeProgress = {
+      searchId, profilesFound, queriesUsed, queriesTotal: totalQueries,
+      currentQuery: "", currentCompany: "", status: "error",
+    };
+    opts.onProgress?.(errProgress);
     throw err;
   }
 }

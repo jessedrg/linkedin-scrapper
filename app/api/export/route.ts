@@ -1,15 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getProfiles } from "@/lib/db";
+import { getProfiles } from "@/lib/db/queries";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   const sp = req.nextUrl.searchParams;
   const format = sp.get("format") || "csv";
-  const searchId = sp.get("searchId") || undefined;
-  const minScore = sp.get("minScore") ? Number(sp.get("minScore")) : 0;
+  const searchId = sp.get("searchId") ? Number(sp.get("searchId")) : undefined;
+  const company = sp.get("company") ?? undefined;
 
-  const { profiles } = getProfiles({ searchId, minScore, limit: 100000, sort: "score", order: "desc" });
+  const { profiles } = await getProfiles({ searchId, company, limit: 100000 });
 
   if (format === "json") {
     return NextResponse.json(profiles, {
@@ -20,10 +20,17 @@ export async function GET(req: NextRequest) {
   }
 
   // CSV
-  const header = "Name,Headline,Location,Score,LinkedIn URL,Source,Created At";
-  const rows = profiles.map(p => {
-    const esc = (s: string) => `"${(s || "").replace(/"/g, '""')}"`;
-    return [esc(p.name), esc(p.headline), esc(p.location), p.score, esc(p.linkedin_url), p.source, p.created_at].join(",");
+  const header = "Name,Title,Company,LinkedIn URL,Source Query,Found At";
+  const rows = profiles.map((p) => {
+    const esc = (s: string | null | undefined) => `"${(s || "").replace(/"/g, '""')}"`;
+    return [
+      esc(p.name),
+      esc(p.title),
+      esc(p.company),
+      esc(p.linkedinUrl),
+      esc(p.sourceQuery),
+      p.createdAt?.toISOString() ?? "",
+    ].join(",");
   });
   const csv = [header, ...rows].join("\n");
 

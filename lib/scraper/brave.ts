@@ -45,3 +45,42 @@ export async function searchBrave(
   }
   return results;
 }
+
+/**
+ * Deep search: paginates through Brave's offsets (0-9) to pull up to ~200
+ * unique LinkedIn profile URLs per query instead of just the first 20.
+ * This is the main multiplier for getting thousands of URLs.
+ */
+export async function searchBraveDeep(
+  query: string,
+  apiKey: string,
+  opts: { maxResults?: number; delayMs?: number } = {},
+): Promise<SearchResult[]> {
+  const maxResults = opts.maxResults ?? 120;
+  const delayMs = opts.delayMs ?? 1100; // Brave free tier ≈ 1 req/sec
+  const seen = new Set<string>();
+  const out: SearchResult[] = [];
+
+  // Brave allows offset 0..9 with count up to 20 → up to 200 results per query
+  for (let offset = 0; offset <= 9 && out.length < maxResults; offset++) {
+    let batch: SearchResult[] = [];
+    try {
+      batch = await searchBrave(query, apiKey, offset, 20);
+    } catch {
+      break;
+    }
+    if (batch.length === 0) break; // no more pages
+
+    for (const r of batch) {
+      const u = r.link.split("?")[0];
+      if (seen.has(u)) continue;
+      seen.add(u);
+      out.push(r);
+    }
+
+    if (batch.length < 20) break; // last page reached
+    if (offset < 9) await new Promise((r) => setTimeout(r, delayMs));
+  }
+
+  return out.slice(0, maxResults);
+}
