@@ -21,9 +21,9 @@ export async function searchDeep(
 ): Promise<SearchResult[]> {
   const serperKey = process.env.SERPER_API_KEY;
   if (serperKey) {
-    // Serper returns 100/page, so we need far fewer pages than Brave.
-    const serperPages = Math.max(1, Math.ceil((opts.maxPages ?? 2) / 3));
-    return searchSerperDeep(query, serperKey, { maxPages: serperPages, delayMs: opts.delayMs ?? 300 });
+    // Serper returns up to 100 results/page vs Brave's 20/page.
+    // Pass maxPages directly — serperDeep defaults to 2 pages (200 results/query).
+    return searchSerperDeep(query, serperKey, { maxPages: opts.maxPages ?? 2, delayMs: opts.delayMs ?? 300 });
   }
 
   const braveKey = process.env.BRAVE_API_KEY;
