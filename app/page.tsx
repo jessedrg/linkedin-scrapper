@@ -76,7 +76,7 @@ interface TalentProfile {
 }
 
 interface TalentEvent {
-  type: "status" | "progress" | "done" | "error";
+  type: "status" | "progress" | "partial" | "done" | "error";
   message?: string;
   queriesDone?: number;
   queriesTotal?: number;
@@ -1067,6 +1067,9 @@ function TalentView() {
             if (evt.type === "progress") {
               setProgress({ done: evt.queriesDone ?? 0, total: evt.queriesTotal ?? 0, found: evt.profilesFound ?? 0 });
             }
+            if (evt.type === "partial" && evt.profiles && evt.profiles.length > 0) {
+              setResults(evt.profiles);
+            }
             if (evt.type === "done") {
               setResults(evt.profiles ?? []);
               setStatusMsg(`Done — ${evt.total ?? 0} profiles ranked`);
@@ -1115,21 +1118,7 @@ function TalentView() {
             AI-powered LinkedIn sourcing across {["S","A","B","Mega"].map(t => TIER_CONFIG[t].label).join(" / ")} companies. Scored + AI re-ranked.
           </p>
         </div>
-        {results.length > 0 && (
-          <a
-            href={`data:text/csv;charset=utf-8,${encodeURIComponent(
-              ["Rank,Firstname,Name,Title,Company,Tier,Score,Location,LinkedIn"].concat(
-                filtered.map((p, i) =>
-                  [i+1, `"${p.firstname}"`, `"${p.name}"`, `"${p.title}"`, `"${p.company}"`, p.companyTier ?? "", p.score, `"${p.location}"`, p.linkedinUrl].join(",")
-                )
-              ).join("\n")
-            )}`}
-            download="top-talent.csv"
-            className="btn-secondary text-sm"
-          >
-            <Download className="h-4 w-4" /> Export CSV
-          </a>
-        )}
+
       </div>
 
       {/* Search Form */}
@@ -1270,9 +1259,40 @@ function TalentView() {
         </div>
       )}
 
-      {/* Results */}
+      {/* Results — shown live during search AND after completion */}
       {results.length > 0 && (
         <div className="space-y-4">
+          {/* Live CSV download — always available once profiles start appearing */}
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-white/30">
+              {running ? `${results.length} profiles so far (updating live)...` : `${results.length} profiles found`}
+            </span>
+            <a
+              href={`data:text/csv;charset=utf-8,${encodeURIComponent(
+                ["Rank,Name,Firstname,Title,Company,Tier,Score,Location,LinkedIn"].concat(
+                  filtered.map((p, i) =>
+                    [
+                      i + 1,
+                      `"${p.name}"`,
+                      `"${p.firstname}"`,
+                      `"${p.title}"`,
+                      `"${p.company}"`,
+                      p.companyTier ?? "",
+                      p.score,
+                      `"${p.location}"`,
+                      p.linkedinUrl,
+                    ].join(",")
+                  )
+                ).join("\n")
+              )}`}
+              download={`talent-${role.replace(/\s+/g, "-").toLowerCase()}.csv`}
+              className="btn-secondary text-xs py-1.5 px-3 flex items-center gap-1.5"
+            >
+              <Download className="h-3.5 w-3.5" />
+              {running ? "Download CSV (partial)" : "Download CSV"}
+            </a>
+          </div>
+
           {/* Tier breakdown + filters */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2">

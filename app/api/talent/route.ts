@@ -258,6 +258,7 @@ export async function POST(req: NextRequest) {
         // The scorer filters by role relevance AFTER collection.
         const allRaw: Array<{ title: string; company: string; linkedinUrl: string; snippet: string }> = [];
         const seenUrls = new Set<string>();
+        let lastPartialAt = 0;
 
         for (let qi = 0; qi < queryList.length; qi++) {
           const { query: q, type: qType } = queryList[qi];
@@ -286,6 +287,17 @@ export async function POST(req: NextRequest) {
           }
           if (allRaw.length > prevCount) {
             send({ type: "progress", queriesDone: qi + 1, queriesTotal: queryList.length, profilesFound: allRaw.length });
+
+            // Every 30 new profiles, score what we have and stream a partial snapshot
+            // so the UI can show a live table and allow CSV download during the search.
+            if (allRaw.length - lastPartialAt >= 30) {
+              lastPartialAt = allRaw.length;
+              const partialScored = allRaw.map((p) =>
+                scoreProfile(p, { role, location, preferredTiers: tiers as CompanyTier[] }),
+              );
+              const partialRanked = rankProfiles(partialScored).slice(0, 200);
+              send({ type: "partial", profiles: partialRanked, total: partialRanked.length });
+            }
           }
 
           if (allRaw.length >= 50000) break;
