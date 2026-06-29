@@ -184,6 +184,29 @@ export function normaliseRole(raw: string): { keywords: string[]; titles: string
   return { keywords: words, titles: [withoutLoc, ...words.slice(0, 3)], exactPhrases: [withoutLoc] };
 }
 
+/**
+ * Hard filter — returns true ONLY if the profile title contains the searched role
+ * or one of its known synonyms. Used to discard irrelevant Brave results before scoring.
+ * This is the single most important quality gate in the pipeline.
+ */
+export function titleMatchesRole(
+  rawTitle: string,
+  role: string,
+  extraSynonyms: string[] = [],
+): boolean {
+  const { exactPhrases, titles } = normaliseRole(role);
+  const t = rawTitle.toLowerCase();
+
+  // Check all known phrases + any AI-generated synonyms passed in
+  const allPhrases = [
+    ...exactPhrases.map((p) => p.toLowerCase()),
+    ...titles.map((p) => p.toLowerCase()),
+    ...extraSynonyms.map((p) => p.toLowerCase()),
+  ];
+
+  return allPhrases.some((phrase) => t.includes(phrase));
+}
+
 /** Extract company name from a Brave result title/snippet */
 export function extractCompanyFromResult(title: string, snippet: string): string {
   const combined = `${title} ${snippet}`;

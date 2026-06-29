@@ -10,7 +10,7 @@
 
 import { type NextRequest } from "next/server";
 import { searchBraveDeep } from "@/lib/scraper/brave";
-import { scoreProfile, rankProfiles, extractCompanyFromResult, normaliseRole } from "@/lib/scraper/scorer";
+import { scoreProfile, rankProfiles, extractCompanyFromResult, normaliseRole, titleMatchesRole } from "@/lib/scraper/scorer";
 import { getCompaniesByTier, type CompanyTier } from "@/lib/scraper/companies";
 import { db } from "@/lib/db";
 import { talentSearches, profiles } from "@/lib/db/schema";
@@ -237,7 +237,49 @@ export async function POST(req: NextRequest) {
         const tieredCos = getCompaniesByTier(tiers as CompanyTier[]);
         const companyNames = tieredCos.map((c) => c.name);
 
-        send({ type: "status", message: `Generating AI queries for ${companyNames.length} companies across tiers ${tiers.join("/")}...` });
+        // Step 1: Ask the AI to generate ALL possible title synonyms for this role.
+        // These are used as a hard filter — any profile whose title doesn't match
+        // at least one synonym is discarded immediately, preventing irrelevant results.
+        send({ type: "status", message: `Expanding role synonyms with AI...` });
+        let aiSynonyms: string[] = [];
+        try {
+          const synRes = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY ?? ""}`,
+            },
+            body: JSON.stringify({
+              model: "gpt-4o-mini",
+              messages: [
+                {
+                  role: "system",
+                  content: `You are a LinkedIn recruiter. Given a job role, return ALL possible exact title variations that someone with that role uses on their LinkedIn profile.
+Return ONLY a JSON array of strings. No explanation. No extra text. Just the JSON array.
+Be comprehensive — include abbreviations, seniority prefixes (Senior/Staff/Lead/Principal), and slightly different phrasings people actually use on LinkedIn.`,
+                },
+                {
+                  role: "user",
+                  content: `Role: "${role}"\n\nReturn all LinkedIn title variations as a JSON string array.`,
+                },
+              ],
+              temperature: 0.3,
+              max_tokens: 500,
+            }),
+          });
+          if (synRes.ok) {
+            const synData = (await synRes.json()) as { choices: Array<{ message: { content: string } }> };
+            const raw = synData.choices[0]?.message?.content?.trim() ?? "[]";
+            // Strip markdown code fences if present
+            const clean = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "").trim();
+            const parsed = JSON.parse(clean);
+            if (Array.isArray(parsed)) aiSynonyms = parsed.map(String).filter(Boolean);
+          }
+        } catch {
+          // Continue — static synonyms from normaliseRole() will still filter
+        }
+
+        send({ type: "status", message: `Generating queries for ${companyNames.length} companies (${tiers.join("/")})...` });
 
         const queries = await generateTalentQueries({
           role,
@@ -267,6 +309,10 @@ export async function POST(req: NextRequest) {
             const url = r.link.split("?")[0];
             if (seenUrls.has(url)) continue;
             seenUrls.add(url);
+
+            // HARD FILTER: discard any profile whose title doesn't match the role.
+            // This is the primary quality gate — eliminates irrelevant results before scoring.
+            if (!titleMatchesRole(r.title, role, aiSynonyms)) continue;
 
             const company = extractCompanyFromResult(r.title, r.snippet);
             allRaw.push({ title: r.title, company, linkedinUrl: url, snippet: r.snippet });
