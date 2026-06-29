@@ -488,6 +488,13 @@ export async function POST(req: NextRequest) {
           }
         }
 
+        if (runSERP && !provider) {
+          // PDL failed and there is no SERP key to fall back to
+          send({ type: "error", message: "PDL out of credits and no SERP key configured. Add SERPER_API_KEY to continue." });
+          controller.close();
+          return;
+        }
+
         if (runSERP) {
           // ── SERP PATH: Google/Brave scraping (primary or PDL fallback) ───────
           send({ type: "status", message: "Generating queries for " + companyNames.length + " companies..." });
