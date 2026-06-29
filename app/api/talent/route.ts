@@ -78,29 +78,37 @@ async function generateTalentQueries(opts: {
   };
 
   const locStr = location ? " \"" + location + "\"" : "";
-  const seniorityPrefixes = ["", "senior ", "staff ", "principal ", "lead ", "founding "];
+  const seniorityPrefixes = ["", "senior ", "staff ", "lead ", "principal "];
 
-  // Tier 1: exact phrase + seniority variants, with and without company
+  // KEY INSIGHT: never put location inside company queries — it fragments the Brave index
+  // and causes most queries to return 0 results. Location is only used in no-company queries
+  // where it usefully narrows by geography. For company queries, omit location entirely
+  // so Brave returns ALL people with that title at that company worldwide, then the scorer
+  // applies location bonuses. This is the main lever for finding thousands of profiles.
+
+  // --- Round 1: No-company queries, with AND without location ---
   for (const phrase of exactPhrases) {
     for (const prefix of seniorityPrefixes) {
-      const titleQ = "\"" + prefix + phrase + "\"";
-      add(SITE + " " + titleQ + locStr);
-      for (const company of companies.slice(0, 40)) {
-        add(SITE + " \"" + company + "\" " + titleQ + locStr);
-      }
+      add(SITE + " \"" + prefix + phrase + "\"");               // global
+      if (location) add(SITE + " \"" + prefix + phrase + "\"" + locStr); // local
+    }
+  }
+  for (const title of titles) {
+    add(SITE + " \"" + title + "\"");
+    if (location) add(SITE + " \"" + title + "\"" + locStr);
+  }
+
+  // --- Round 2: Company queries WITHOUT location (maximises results per company) ---
+  for (const company of companies) {
+    for (const phrase of exactPhrases) {
+      add(SITE + " \"" + company + "\" \"" + phrase + "\"");
+    }
+    for (const title of titles.slice(0, 3)) {
+      add(SITE + " \"" + company + "\" \"" + title + "\"");
     }
   }
 
-  // Tier 2: alias titles
-  for (const title of titles.slice(0, 4)) {
-    const titleQ = "\"" + title + "\"";
-    add(SITE + " " + titleQ + locStr);
-    for (const company of companies.slice(0, 20)) {
-      add(SITE + " \"" + company + "\" " + titleQ + locStr);
-    }
-  }
-
-  // Tier 3: AI-generated queries
+  // --- Round 3: AI-generated queries
   try {
     const companySample = companies.slice(0, 25).join(", ");
     const res = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
@@ -271,12 +279,17 @@ export async function POST(req: NextRequest) {
             continue;
           }
 
+          const prevCount = allRaw.length;
           for (const r of results) {
             const url = r.link.split("?")[0];
             if (seenUrls.has(url)) continue;
             seenUrls.add(url);
             const company = extractCompanyFromResult(r.title, r.snippet);
             allRaw.push({ title: r.title, company, linkedinUrl: url, snippet: r.snippet });
+          }
+          // Send updated count immediately when new profiles are found
+          if (allRaw.length > prevCount) {
+            send({ type: "progress", queriesDone: qi + 1, queriesTotal: queries.length, profilesFound: allRaw.length });
           }
 
           if (allRaw.length >= 5000) break;
