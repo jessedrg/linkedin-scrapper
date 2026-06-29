@@ -70,7 +70,8 @@ interface TalentProfile {
   linkedinUrl: string;
   location: string;
   score: number;
-  companyTier: CompanyTier | null;
+  companyTier: CompanyTier | "Unknown" | null;
+  startupSignals: string[];
   matchReasons: string[];
   snippet: string;
 }
@@ -973,6 +974,7 @@ const TIER_CONFIG: Record<string, { label: string; color: string; bg: string; bo
   A: { label: "Tier A", color: "text-slate-300", bg: "bg-slate-500/10", border: "border-slate-500/30", glow: "shadow-slate-500/10", icon: "◆" },
   B: { label: "Tier B", color: "text-orange-400", bg: "bg-orange-500/10", border: "border-orange-500/30", glow: "shadow-orange-500/10", icon: "●" },
   Mega: { label: "Mega", color: "text-violet-400", bg: "bg-violet-500/10", border: "border-violet-500/30", glow: "shadow-violet-500/20", icon: "⬡" },
+  Unknown: { label: "Startup", color: "text-emerald-400", bg: "bg-emerald-500/10", border: "border-emerald-500/30", glow: "shadow-emerald-500/10", icon: "◎" },
 };
 
 function TierBadge({ tier }: { tier: string | null }) {
@@ -1392,8 +1394,8 @@ function TalentView() {
                         <div className="text-xs text-white/25 truncate">{p.company}</div>
                       </div>
 
-                      {/* Tier badge */}
-                      <div className="pr-4">
+                      {/* Tier badge + startup signals */}
+                      <div className="pr-4 flex flex-col items-end gap-1">
                         {tierCfg ? (
                           <span className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-bold whitespace-nowrap ${tierCfg.color} ${tierCfg.bg} ${tierCfg.border}`}>
                             <span className="text-[8px]">{tierCfg.icon}</span>
@@ -1401,6 +1403,16 @@ function TalentView() {
                           </span>
                         ) : (
                           <span className="text-[10px] text-white/15">—</span>
+                        )}
+                        {/* Startup signals — shown as mini chips under the badge */}
+                        {p.companyTier === "Unknown" && p.startupSignals && p.startupSignals.length > 0 && (
+                          <div className="flex flex-wrap justify-end gap-1 max-w-[120px]">
+                            {p.startupSignals.slice(0, 2).map((sig, si) => (
+                              <span key={si} className="rounded bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0 text-[9px] text-emerald-400/70 whitespace-nowrap">
+                                {sig}
+                              </span>
+                            ))}
+                          </div>
                         )}
                       </div>
 
@@ -1418,6 +1430,16 @@ function TalentView() {
                           <div className="flex-1 min-w-0 space-y-3">
                             {p.snippet && (
                               <p className="text-xs text-white/40 leading-relaxed line-clamp-3">{p.snippet}</p>
+                            )}
+                            {p.startupSignals && p.startupSignals.length > 0 && (
+                              <div className="flex flex-wrap gap-1.5 mb-1">
+                                <span className="text-[10px] text-emerald-400/50 font-medium">Startup signals:</span>
+                                {p.startupSignals.map((sig, si) => (
+                                  <span key={si} className="rounded bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 text-[10px] text-emerald-400/80">
+                                    {sig}
+                                  </span>
+                                ))}
+                              </div>
                             )}
                             {p.matchReasons.length > 0 && (
                               <div className="flex flex-wrap gap-1.5">

@@ -4,7 +4,8 @@
  * Used by the talent search to surface the best candidates first.
  */
 
-import { getCompanyTier, type CompanyTier } from "./companies";
+import { getCompanyTier } from "./companies";
+import type { CompanyTier } from "./companies";
 
 export interface ScoredProfile {
   name: string;
@@ -14,10 +15,25 @@ export interface ScoredProfile {
   linkedinUrl: string;
   location: string;
   score: number;
-  companyTier: CompanyTier | null;
+  companyTier: CompanyTier | "Unknown" | null;
+  startupSignals: string[]; // signals detected for unknown companies
   matchReasons: string[];
   snippet: string;
 }
+
+// ── Startup quality heuristics ────────────────────────────────────────────────
+// When a company is NOT in our curated list, we scan the snippet for signals
+// that suggest it's a promising startup vs. a random unknown.
+const STARTUP_SIGNALS: Array<{ pattern: RegExp; label: string; score: number }> = [
+  { pattern: /\b(series [a-e]|seed|pre-seed|raised|funded|funding)\b/i, label: "Funded", score: 8 },
+  { pattern: /\b(y combinator|yc|techstars|a16z|sequoia|benchmark|accel|greylock|kleiner|nea|vc backed)\b/i, label: "Top VC", score: 14 },
+  { pattern: /\b(unicorn|\$[1-9]\d*[bm] valuation|valued at)\b/i, label: "Unicorn", score: 12 },
+  { pattern: /\b(hypergrowth|fast.growing|100x|10x growth|growing fast)\b/i, label: "Hypergrowth", score: 6 },
+  { pattern: /\b(ipo|nasdaq|nyse|public company)\b/i, label: "Public", score: 10 },
+  { pattern: /\b(ex-google|ex-meta|ex-apple|ex-stripe|ex-openai|former google|former meta|ex-faang)\b/i, label: "Ex-FAANG founder", score: 10 },
+  { pattern: /\b(stealth|early stage|founding team|co-founder|cofounder)\b/i, label: "Early stage", score: 5 },
+  { pattern: /\b(profitable|revenue|growing revenue|arr|mrr)\b/i, label: "Revenue signal", score: 4 },
+];
 
 interface ScoreOpts {
   role: string;
@@ -270,15 +286,36 @@ export function scoreProfile(
 
   // 1. Company tier score
   const tier = getCompanyTier(profile.company);
-  const tierScore = tier ? (TIER_SCORE[tier] ?? 0) : 0;
+  const startupSignals: string[] = [];
+
   if (tier) {
+    const tierScore = TIER_SCORE[tier] ?? 0;
     score += tierScore;
     const tierLabel = tier === "S" ? "Tier S (elite startup)" : tier === "Mega" ? "Mega-cap" : `Tier ${tier}`;
     reasons.push(`${tierLabel}: +${tierScore}`);
-    // Bonus if it's in the user's preferred tiers
     if (preferredTiers.includes(tier)) {
       score += 8;
       reasons.push("Preferred tier: +8");
+    }
+  } else {
+    // Unknown company — scan snippet + title for startup quality signals
+    const snippetLower = `${profile.title ?? ""} ${profile.snippet ?? ""}`.toLowerCase();
+    let startupScore = 0;
+    for (const sig of STARTUP_SIGNALS) {
+      if (sig.pattern.test(snippetLower)) {
+        startupSignals.push(sig.label);
+        startupScore += sig.score;
+      }
+    }
+    if (startupScore > 0) {
+      const capped = Math.min(startupScore, 25);
+      score += capped;
+      reasons.push(`Unknown startup signals (${startupSignals.join(", ")}): +${capped}`);
+    }
+    // No signals = likely irrelevant company — small penalty
+    if (startupSignals.length === 0) {
+      score -= 5;
+      reasons.push("Unknown company, no startup signals: -5");
     }
   }
 
@@ -375,7 +412,8 @@ export function scoreProfile(
     linkedinUrl: profile.linkedinUrl,
     location: extractedLoc,
     score: Math.min(score, 100),
-    companyTier: tier,
+    companyTier: tier ?? (startupSignals.length > 0 ? "Unknown" : null),
+    startupSignals,
     matchReasons: reasons,
     snippet: profile.snippet ?? "",
   };
