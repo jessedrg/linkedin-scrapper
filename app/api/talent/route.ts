@@ -65,52 +65,41 @@ async function generateTalentQueries(opts: {
   location: string;
   companies: string[];
   totalQueries: number;
-}): Promise<string[]> {
+}): Promise<{ query: string; type: "company" | "role" }[]> {
   const { role, location, companies } = opts;
   const SITE = "site:linkedin.com/in/";
   const { exactPhrases, titles } = normaliseRole(role);
 
-  const queries: string[] = [];
+  const queries: { query: string; type: "company" | "role" }[] = [];
   const seen = new Set<string>();
-  const add = (q: string) => {
+  const add = (q: string, type: "company" | "role") => {
     const k = q.toLowerCase().trim();
-    if (!seen.has(k) && k.length > 20) { seen.add(k); queries.push(q); }
+    if (!seen.has(k) && k.length > 20) { seen.add(k); queries.push({ query: q, type }); }
   };
 
+  // ── TIER A: Company-only queries — NO role phrase, NO location ──
+  // Each company query can return up to 200 results (10 pages x 20).
+  // With 300 companies = up to 60,000 raw profiles.
+  // The role filter happens AFTER collection in the scorer.
+  for (const company of companies) {
+    add(SITE + " \"" + company + "\"", "company");
+  }
+
+  // ── TIER B: Role-phrase queries — catch people outside our company list ──
+  // No location = global reach. Location variant as secondary.
   const locStr = location ? " \"" + location + "\"" : "";
-  const seniorityPrefixes = ["", "senior ", "staff ", "lead ", "principal "];
-
-  // KEY INSIGHT: never put location inside company queries — it fragments the Brave index
-  // and causes most queries to return 0 results. Location is only used in no-company queries
-  // where it usefully narrows by geography. For company queries, omit location entirely
-  // so Brave returns ALL people with that title at that company worldwide, then the scorer
-  // applies location bonuses. This is the main lever for finding thousands of profiles.
-
-  // --- Round 1: No-company queries, with AND without location ---
   for (const phrase of exactPhrases) {
-    for (const prefix of seniorityPrefixes) {
-      add(SITE + " \"" + prefix + phrase + "\"");               // global
-      if (location) add(SITE + " \"" + prefix + phrase + "\"" + locStr); // local
-    }
+    add(SITE + " \"" + phrase + "\"", "role");
+    if (location) add(SITE + " \"" + phrase + "\"" + locStr, "role");
   }
   for (const title of titles) {
-    add(SITE + " \"" + title + "\"");
-    if (location) add(SITE + " \"" + title + "\"" + locStr);
+    add(SITE + " \"" + title + "\"", "role");
+    if (location) add(SITE + " \"" + title + "\"" + locStr, "role");
   }
 
-  // --- Round 2: Company queries WITHOUT location (maximises results per company) ---
-  for (const company of companies) {
-    for (const phrase of exactPhrases) {
-      add(SITE + " \"" + company + "\" \"" + phrase + "\"");
-    }
-    for (const title of titles.slice(0, 3)) {
-      add(SITE + " \"" + company + "\" \"" + title + "\"");
-    }
-  }
-
-  // --- Round 3: AI-generated queries
+  // ── TIER C: AI-generated role queries for synonym coverage ──
   try {
-    const companySample = companies.slice(0, 25).join(", ");
+    const companySample = companies.slice(0, 20).join(", ");
     const res = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -124,13 +113,15 @@ async function generateTalentQueries(opts: {
             role: "system",
             content:
               "You are an expert LinkedIn talent sourcer. " +
-              "EVERY query MUST contain the exact role title or a close synonym as a quoted phrase. " +
-              "Return ONLY raw queries, one per line. No numbering, no explanations.",
+              "Generate LinkedIn search queries using role title synonyms. " +
+              "Format: site:linkedin.com/in/ \"Title Synonym\" " +
+              "or site:linkedin.com/in/ \"Company\" \"Title Synonym\". " +
+              "Return ONLY raw queries, one per line. No numbering.",
           },
           { role: "user", content: buildPromptQueryGen(role, location, companySample) },
         ],
-        temperature: 0.7,
-        max_tokens: 2000,
+        temperature: 0.8,
+        max_tokens: 1500,
       }),
     });
     if (res.ok) {
@@ -138,10 +129,10 @@ async function generateTalentQueries(opts: {
       const text = data.choices[0]?.message?.content ?? "";
       for (const line of text.split("\n")) {
         const q = line.trim().replace(/^\d+\.\s*/, "");
-        if (q.startsWith("site:linkedin.com/in/")) add(q);
+        if (q.toLowerCase().startsWith("site:linkedin.com/in/")) add(q, "role");
       }
     }
-  } catch { /* bonus — continue with static */ }
+  } catch { /* bonus */ }
 
   return queries.slice(0, opts.totalQueries);
 }
@@ -252,28 +243,34 @@ export async function POST(req: NextRequest) {
 
         send({ type: "status", message: "Generating queries for " + companyNames.length + " companies (" + tiers.join("/") + ")..." });
 
-        const queries = await generateTalentQueries({
+        const queryList = await generateTalentQueries({
           role,
           location,
           companies: companyNames,
           totalQueries: queriesTotal,
         });
 
-        send({ type: "status", message: "Running " + queries.length + " searches...", queriesTotal: queries.length });
+        send({ type: "status", message: "Running " + queryList.length + " searches (" + companyNames.length + " companies)...", queriesTotal: queryList.length });
 
-        // ── Phase 1: COLLECT everything — no filtering during collection ──
-        // The queries already contain the role title as a quoted phrase, so
-        // Brave already constrains results heavily. We collect all and filter after.
+        // ── Phase 1: COLLECT — no filtering during collection ──
+        // Company queries paginate up to 10 pages (200 results each) = thousands of profiles.
+        // Role queries paginate 2 pages max — used to catch people at unlisted companies.
+        // The scorer filters by role relevance AFTER collection.
         const allRaw: Array<{ title: string; company: string; linkedinUrl: string; snippet: string }> = [];
         const seenUrls = new Set<string>();
 
-        for (let qi = 0; qi < queries.length; qi++) {
-          const q = queries[qi];
-          send({ type: "progress", queriesDone: qi, queriesTotal: queries.length, profilesFound: allRaw.length });
+        for (let qi = 0; qi < queryList.length; qi++) {
+          const { query: q, type: qType } = queryList[qi];
+          send({ type: "progress", queriesDone: qi, queriesTotal: queryList.length, profilesFound: allRaw.length });
 
           let results;
           try {
-            results = await searchBraveDeep(q, braveKey, { delayMs: 700 });
+            // Company queries: full 10-page pagination (up to 200 results each)
+            // Role queries: 2 pages max (role-phrase results are usually exhausted quickly)
+            results = await searchBraveDeep(q, braveKey, {
+              maxPages: qType === "company" ? 10 : 2,
+              delayMs: 700,
+            });
           } catch {
             await new Promise((r) => setTimeout(r, 2000));
             continue;
@@ -287,15 +284,14 @@ export async function POST(req: NextRequest) {
             const company = extractCompanyFromResult(r.title, r.snippet);
             allRaw.push({ title: r.title, company, linkedinUrl: url, snippet: r.snippet });
           }
-          // Send updated count immediately when new profiles are found
           if (allRaw.length > prevCount) {
-            send({ type: "progress", queriesDone: qi + 1, queriesTotal: queries.length, profilesFound: allRaw.length });
+            send({ type: "progress", queriesDone: qi + 1, queriesTotal: queryList.length, profilesFound: allRaw.length });
           }
 
-          if (allRaw.length >= 5000) break;
+          if (allRaw.length >= 50000) break;
         }
 
-        send({ type: "status", message: "Collected " + allRaw.length + " profiles. Getting AI synonyms..." });
+        send({ type: "status", message: "Collected " + allRaw.length + " raw profiles. Filtering by role..." });
 
         // ── Phase 2: AI synonym expansion (once, after collection) ──
         let aiSynonyms: string[] = [];
