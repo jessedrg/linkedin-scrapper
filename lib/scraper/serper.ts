@@ -35,6 +35,8 @@ export async function searchSerper(
       q: query.slice(0, 400),
       num: Math.min(num, 100),
       page,
+      gl: "us",   // country — matches Serper playground default
+      hl: "en",   // language — returns English LinkedIn profiles
     }),
   });
 

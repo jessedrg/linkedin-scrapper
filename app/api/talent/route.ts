@@ -86,53 +86,64 @@ async function generateTalentQueries(opts: {
     if (!seen.has(k) && k.length > 20) { seen.add(k); queries.push({ query: q, type }); }
   };
 
-  const seniorityPrefixes = ["", "Senior ", "Staff ", "Lead ", "Principal "];
-
-  // Build UNQUOTED location terms. Unlike a quoted "San Francisco" (which Brave
-  // requires verbatim and almost no snippet contains), unquoted terms are treated
-  // as soft relevance signals: Brave biases toward that geography but still returns
-  // people who list "Bay Area", "SF", etc. We append several metro phrasings.
-  const locationTerms: string[] = [];
+  // Build location OR group — Serper/Google supports OR natively.
+  // Quoted variants catch exact text in the profile; unquoted fallback catches abbreviations.
+  const locOrParts: string[] = [];
   if (location) {
     const loc = location.toLowerCase();
-    locationTerms.push(location);
     if (loc.includes("san francisco") || loc.includes("sf") || loc.includes("bay area")) {
-      locationTerms.push("Bay Area", "Silicon Valley");
+      locOrParts.push('"San Francisco Bay Area"', '"San Francisco, California"', "SF");
     } else if (loc.includes("new york") || loc.includes("nyc")) {
-      locationTerms.push("New York", "NYC");
+      locOrParts.push('"New York City"', '"New York, New York"', "NYC");
     } else if (loc.includes("london")) {
-      locationTerms.push("London", "United Kingdom");
-    } else if (loc.includes("los angeles") || loc.includes("la")) {
-      locationTerms.push("Los Angeles", "LA");
+      locOrParts.push('"London, England"', '"Greater London"', "London");
+    } else if (loc.includes("los angeles") || loc.includes(" la,")) {
+      locOrParts.push('"Los Angeles"', '"Los Angeles, California"', "LA");
+    } else if (loc.includes("seattle")) {
+      locOrParts.push('"Seattle"', '"Seattle, Washington"');
+    } else if (loc.includes("austin")) {
+      locOrParts.push('"Austin"', '"Austin, Texas"');
+    } else if (loc.includes("boston")) {
+      locOrParts.push('"Boston"', '"Boston, Massachusetts"');
+    } else if (loc.includes("chicago")) {
+      locOrParts.push('"Chicago"', '"Chicago, Illinois"');
+    } else {
+      // Generic: quote the city name as-is
+      locOrParts.push('"' + location + '"');
     }
   }
+  const locGroup = locOrParts.length > 0 ? " (" + locOrParts.join(" OR ") + ")" : "";
 
-  // IMPORTANT: queries are emitted in order of PRODUCTIVITY (most results first),
-  // because the final list is capped with slice(0, totalQueries).
-
-  // ── PRIMARY: Title + UNQUOTED location — geo-biased, still high yield ────────
-  // Brave ranks local profiles first but does NOT require exact location text,
-  // so we keep volume while strongly favoring the requested area.
-  if (locationTerms.length > 0) {
-    for (const variant of allVariants) {
-      for (const prefix of seniorityPrefixes) {
-        add(SITE + " \"" + prefix + variant + "\" " + locationTerms.join(" "), "role");
-      }
-    }
+  // Build role OR group — all known variants in one parenthetical.
+  // This is the key insight from Serper playground: 1 OR-query >> many single-variant queries.
+  // We chunk variants into groups of 4 to stay under URL length limits.
+  const chunkSize = 4;
+  const variantChunks: string[][] = [];
+  for (let i = 0; i < allVariants.length; i += chunkSize) {
+    variantChunks.push(allVariants.slice(i, i + chunkSize));
   }
 
-  // ── SECONDARY: Title only (no location) — global reach, catches everyone ────
-  for (const variant of allVariants) {
-    for (const prefix of seniorityPrefixes) {
-      add(SITE + " \"" + prefix + variant + "\"", "role");
-    }
+  // ── PRIMARY: OR-role + OR-location — 1 query catches everything geo-targeted ──
+  // e.g. site:linkedin.com/in ("FDE" OR "Forward Deployed Engineer") ("SF" OR "Bay Area")
+  for (const chunk of variantChunks) {
+    const roleGroup = "(" + chunk.map((v) => '"' + v + '"').join(" OR ") + ")";
+    add(SITE + " " + roleGroup + locGroup, "role");
   }
 
-  // ── TERTIARY: Title × company — Brave pre-filters by role + company ──────────
-  for (const variant of allVariants) {
-    for (const company of companies) {
-      add(SITE + " \"" + company + "\" \"" + variant + "\"", "company");
-    }
+  // ── SECONDARY: OR-role only — global sweep, no location filter ───────────────
+  for (const chunk of variantChunks) {
+    const roleGroup = "(" + chunk.map((v) => '"' + v + '"').join(" OR ") + ")";
+    add(SITE + " " + roleGroup, "role");
+  }
+
+  // ── TERTIARY: OR-role × company batches — role+company pre-filtered by Google ─
+  // Chunk companies into groups of 3 to keep query length reasonable.
+  const companyChunkSize = 3;
+  for (let ci = 0; ci < companies.length; ci += companyChunkSize) {
+    const companyChunk = companies.slice(ci, ci + companyChunkSize);
+    const compGroup = "(" + companyChunk.map((c) => '"' + c + '"').join(" OR ") + ")";
+    const roleGroup = "(" + allVariants.slice(0, 6).map((v) => '"' + v + '"').join(" OR ") + ")";
+    add(SITE + " " + compGroup + " " + roleGroup, "company");
   }
 
   return queries.slice(0, opts.totalQueries);
