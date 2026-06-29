@@ -87,36 +87,139 @@ export function extractCompany(title: string, snippet: string): string {
 }
 
 /** Build a normalised role search query from natural language */
-export function normaliseRole(raw: string): { keywords: string[]; titles: string[] } {
+export function normaliseRole(raw: string): { keywords: string[]; titles: string[]; exactPhrases: string[] } {
   const lower = raw.toLowerCase();
 
-  // Extract location clause so it doesn't pollute role matching
+  // Strip location/company clauses so they don't pollute role matching
   const withoutLoc = lower
-    .replace(/\bin\s+[\w\s]+/g, "")
-    .replace(/\bat\s+[\w\s]+/g, "")
+    .replace(/\bin\s+[a-z\s,]+$/g, "")
+    .replace(/\bat\s+[a-z\s,]+$/g, "")
+    .replace(/\bfrom\s+[a-z\s,]+$/g, "")
     .trim();
 
   const words = withoutLoc.split(/\s+/).filter((w) => w.length > 2);
 
-  // Common role aliases
-  const titleMap: Record<string, string[]> = {
-    "forward deployed": ["forward deployed engineer", "fde", "forward deployed", "solutions engineer", "field engineer"],
-    "software engineer": ["software engineer", "swe", "software developer", "backend engineer", "frontend engineer"],
-    "product manager": ["product manager", "pm", "product lead", "group pm", "senior pm"],
-    "data scientist": ["data scientist", "ml engineer", "machine learning", "ai engineer", "research scientist"],
-    "designer": ["product designer", "ux designer", "ui designer", "design engineer", "visual designer"],
-    "devops": ["devops", "sre", "platform engineer", "infrastructure engineer", "cloud engineer"],
-    "engineering manager": ["engineering manager", "em", "manager engineering", "head of engineering", "vp engineering"],
-    "recruiter": ["recruiter", "talent acquisition", "technical recruiter", "sourcer"],
-    "sales": ["account executive", "ae", "sales", "business development", "enterprise sales"],
-    "marketing": ["marketing", "growth", "demand generation", "content", "brand"],
-  };
+  // Role alias map — the FIRST entry is the canonical/exact phrase used in queries
+  // The full list is used for scoring (title match detection)
+  const titleMap: Array<{ keys: string[]; titles: string[]; exactPhrases: string[] }> = [
+    {
+      keys: ["forward deploy", "fde"],
+      titles: ["forward deployed engineer", "forward deployment engineer", "fde", "forward deployed", "field engineer", "solutions engineer", "deployment engineer"],
+      exactPhrases: ["forward deployed engineer", "forward deployment engineer", "FDE", "field engineer"],
+    },
+    {
+      keys: ["solutions engineer", "se "],
+      titles: ["solutions engineer", "solutions architect", "presales engineer", "field engineer", "sales engineer"],
+      exactPhrases: ["solutions engineer", "solutions architect", "sales engineer"],
+    },
+    {
+      keys: ["software engineer", "swe", "software dev"],
+      titles: ["software engineer", "swe", "software developer", "backend engineer", "frontend engineer", "full stack engineer"],
+      exactPhrases: ["software engineer", "software developer"],
+    },
+    {
+      keys: ["machine learning", "ml engineer", "ai engineer"],
+      titles: ["machine learning engineer", "ml engineer", "ai engineer", "research engineer", "applied scientist", "ai researcher"],
+      exactPhrases: ["machine learning engineer", "ML engineer", "AI engineer"],
+    },
+    {
+      keys: ["data scientist", "data science"],
+      titles: ["data scientist", "data science", "applied scientist", "research scientist", "analytics engineer"],
+      exactPhrases: ["data scientist", "data science"],
+    },
+    {
+      keys: ["product manager", " pm "],
+      titles: ["product manager", "pm", "product lead", "group pm", "director of product", "vp product"],
+      exactPhrases: ["product manager", "product lead"],
+    },
+    {
+      keys: ["engineering manager", " em "],
+      titles: ["engineering manager", "em", "head of engineering", "vp engineering", "director of engineering"],
+      exactPhrases: ["engineering manager", "head of engineering"],
+    },
+    {
+      keys: ["devops", "site reliability", " sre"],
+      titles: ["devops engineer", "sre", "site reliability engineer", "platform engineer", "infrastructure engineer", "cloud engineer"],
+      exactPhrases: ["devops engineer", "site reliability engineer", "SRE"],
+    },
+    {
+      keys: ["designer", "ux ", "ui "],
+      titles: ["product designer", "ux designer", "ui designer", "design engineer", "ux researcher", "visual designer"],
+      exactPhrases: ["product designer", "UX designer"],
+    },
+    {
+      keys: ["recruiter", "talent acquisition"],
+      titles: ["recruiter", "technical recruiter", "talent acquisition", "sourcer", "recruiting manager"],
+      exactPhrases: ["technical recruiter", "recruiter"],
+    },
+    {
+      keys: ["account executive", " ae ", "enterprise sales"],
+      titles: ["account executive", "ae", "enterprise sales", "sales", "business development"],
+      exactPhrases: ["account executive", "enterprise sales"],
+    },
+    {
+      keys: ["growth", "marketing"],
+      titles: ["growth", "marketing", "demand generation", "content marketing", "brand marketing", "growth engineer"],
+      exactPhrases: ["growth engineer", "marketing"],
+    },
+    {
+      keys: ["security engineer", "appsec", "infosec"],
+      titles: ["security engineer", "appsec engineer", "cybersecurity", "infosec", "penetration tester", "red team"],
+      exactPhrases: ["security engineer", "appsec engineer"],
+    },
+    {
+      keys: ["founding engineer", "early engineer"],
+      titles: ["founding engineer", "early engineer", "engineer #", "first engineer"],
+      exactPhrases: ["founding engineer", "early engineer"],
+    },
+  ];
 
-  for (const [key, aliases] of Object.entries(titleMap)) {
-    if (lower.includes(key)) return { keywords: words, titles: aliases };
+  for (const entry of titleMap) {
+    if (entry.keys.some((k) => lower.includes(k.trim()))) {
+      return { keywords: words, titles: entry.titles, exactPhrases: entry.exactPhrases };
+    }
   }
 
-  return { keywords: words, titles: [withoutLoc, ...words.slice(0, 3)] };
+  // Generic fallback — use the raw input as the exact phrase
+  return { keywords: words, titles: [withoutLoc, ...words.slice(0, 3)], exactPhrases: [withoutLoc] };
+}
+
+/**
+ * Hard filter — returns true ONLY if the profile title contains the searched role
+ * or one of its known synonyms. Used to discard irrelevant Brave results before scoring.
+ * This is the single most important quality gate in the pipeline.
+ */
+export function titleMatchesRole(
+  rawTitle: string,
+  role: string,
+  extraSynonyms: string[] = [],
+): boolean {
+  const { exactPhrases, titles } = normaliseRole(role);
+  const t = rawTitle.toLowerCase();
+
+  // Check all known phrases + any AI-generated synonyms passed in
+  const allPhrases = [
+    ...exactPhrases.map((p) => p.toLowerCase()),
+    ...titles.map((p) => p.toLowerCase()),
+    ...extraSynonyms.map((p) => p.toLowerCase()),
+  ];
+
+  return allPhrases.some((phrase) => t.includes(phrase));
+}
+
+/** Extract company name from a Brave result title/snippet */
+export function extractCompanyFromResult(title: string, snippet: string): string {
+  const combined = `${title} ${snippet}`;
+
+  // Pattern: "Name - Title at Company · Location"  (most common LinkedIn format)
+  const atMatch = combined.match(/\bat\s+([A-Z][A-Za-z0-9\s&.,'\-]{1,40?})(?:\s*[·|–\-]|$)/);
+  if (atMatch) return atMatch[1].trim().replace(/[,.]$/, "");
+
+  // Pattern: "Name | Company"
+  const pipeMatch = combined.match(/\|\s*([A-Z][A-Za-z0-9\s&.,'\-]{1,40?})(?:\s*[·|–\-]|$)/);
+  if (pipeMatch) return pipeMatch[1].trim().replace(/[,.]$/, "");
+
+  return "";
 }
 
 // ── Main scorer ───────────────────────────────────────────────────────────────
@@ -143,24 +246,41 @@ export function scoreProfile(
     }
   }
 
-  // 2. Title relevance
-  const { titles } = normaliseRole(role);
+  // 2. Title relevance — use exactPhrases for strong match, titles for partial
+  const { titles, exactPhrases } = normaliseRole(role);
   const titleLower = (profile.title ?? "").toLowerCase();
   let titleScore = 0;
-  for (const t of titles) {
-    if (titleLower.includes(t.toLowerCase())) {
-      titleScore = 20;
-      reasons.push(`Title match "${t}": +20`);
+
+  // Exact phrase match (highest value)
+  for (const phrase of exactPhrases) {
+    if (titleLower.includes(phrase.toLowerCase())) {
+      titleScore = 28;
+      reasons.push(`Exact title match "${phrase}": +28`);
       break;
     }
   }
-  // Partial word match
+  // Broad alias match
   if (titleScore === 0) {
-    const roleWords = role.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+    for (const t of titles) {
+      if (titleLower.includes(t.toLowerCase())) {
+        titleScore = 18;
+        reasons.push(`Title alias match "${t}": +18`);
+        break;
+      }
+    }
+  }
+  // Partial word match (weak signal)
+  if (titleScore === 0) {
+    const roleWords = role.toLowerCase().split(/\s+/).filter((w) => w.length > 4);
     const matches = roleWords.filter((w) => titleLower.includes(w));
-    if (matches.length > 0) {
-      titleScore = Math.min(matches.length * 5, 15);
+    if (matches.length >= 2) {
+      titleScore = Math.min(matches.length * 4, 12);
       reasons.push(`Partial title match (${matches.join(", ")}): +${titleScore}`);
+    }
+    // If zero word overlap, penalise — this is likely an irrelevant result
+    if (matches.length === 0) {
+      score -= 10;
+      reasons.push("No title overlap: -10");
     }
   }
   score += titleScore;
