@@ -510,8 +510,9 @@ function SearchView({
   onComplete: () => void;
 }) {
   const [role, setRole] = useState("");
-  const [queriesPerCompany, setQueriesPerCompany] = useState(20);
-  const [targetPerCompany, setTargetPerCompany] = useState(50);
+  const [queriesPerCompany, setQueriesPerCompany] = useState(150);
+  const [targetPerCompany, setTargetPerCompany] = useState(0); // 0 = sin límite
+  const [maxMode, setMaxMode] = useState(true);
   const [useAI, setUseAI] = useState(true);
   const [preview, setPreview] = useState<{
     companiesCount: number;
@@ -523,7 +524,6 @@ function SearchView({
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [companyCount, setCompanyCount] = useState(0);
-  const esSrc = useRef<EventSource | null>(null);
 
   useEffect(() => {
     fetch("/api/companies").then((r) => r.json()).then((d) => setCompanyCount(d.total)).catch(() => {});
@@ -546,14 +546,18 @@ function SearchView({
   async function handleStart() {
     setLoading(true);
     try {
-      const es = new EventSource(
-        `/api/scrape?role=${encodeURIComponent(role)}&queriesPerCompany=${queriesPerCompany}&targetPerCompany=${targetPerCompany}`,
-      );
-      // POST to start, then open EventSource for progress
+      // POST starts the scrape and streams progress back via SSE in the body.
       const res = await fetch("/api/scrape", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role, queriesPerCompany, targetPerCompany }),
+        body: JSON.stringify({
+          role,
+          queriesPerCompany,
+          targetPerCompany: maxMode ? 0 : targetPerCompany,
+          maxResultsPerQuery: maxMode ? 200 : 60,
+          deep: maxMode,
+          useAI,
+        }),
       });
 
       if (res.body) {
@@ -650,30 +654,51 @@ function SearchView({
           />
         </div>
 
-        <div className="grid grid-cols-2 gap-4">
+        <button
+          onClick={() => setMaxMode(!maxMode)}
+          className={`w-full rounded-lg border px-4 py-3 text-sm font-medium transition-all text-left flex items-center gap-3 ${
+            maxMode
+              ? "border-brand-500/30 bg-brand-500/10 text-brand-400"
+              : "border-white/10 bg-white/5 text-white/40"
+          }`}
+        >
+          <Zap className="h-4 w-4 shrink-0" />
           <div>
-            <label className="label">Queries per company</label>
-            <input
-              type="number"
-              value={queriesPerCompany}
-              onChange={(e) => { setQueriesPerCompany(Number(e.target.value)); setPreview(null); }}
-              className="input-field"
-              min={5}
-              max={100}
-            />
+            <div>{maxMode ? "Modo Máximo Volumen activado" : "Modo Personalizado"}</div>
+            <div className="text-xs opacity-60 mt-0.5">
+              {maxMode
+                ? "Sin límite de perfiles, paginación profunda (~200/query), matriz de queries ampliada"
+                : "Ajusta manualmente queries y tope de perfiles por empresa"}
+            </div>
           </div>
-          <div>
-            <label className="label">Target profiles per company</label>
-            <input
-              type="number"
-              value={targetPerCompany}
-              onChange={(e) => setTargetPerCompany(Number(e.target.value))}
-              className="input-field"
-              min={10}
-              max={500}
-            />
+        </button>
+
+        {!maxMode && (
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="label">Queries per company</label>
+              <input
+                type="number"
+                value={queriesPerCompany}
+                onChange={(e) => { setQueriesPerCompany(Number(e.target.value)); setPreview(null); }}
+                className="input-field"
+                min={5}
+                max={300}
+              />
+            </div>
+            <div>
+              <label className="label">Target profiles per company (0 = sin límite)</label>
+              <input
+                type="number"
+                value={targetPerCompany}
+                onChange={(e) => setTargetPerCompany(Number(e.target.value))}
+                className="input-field"
+                min={0}
+                max={2000}
+              />
+            </div>
           </div>
-        </div>
+        )}
 
         <div>
           <label className="label">AI Enhancement</label>

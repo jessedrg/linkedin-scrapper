@@ -61,11 +61,29 @@ export function parseSearchIntent(role: string): SearchIntent {
   return { titles, locations, seniority };
 }
 
+// Broad department / role keywords used to fan out queries when no specific
+// role is given (or to supplement a given role). Each one surfaces a different
+// slice of a company's employees, which multiplies unique profile URLs.
+const DEPARTMENTS = [
+  "software engineer", "engineer", "developer", "frontend engineer",
+  "backend engineer", "full stack engineer", "mobile engineer",
+  "machine learning engineer", "data scientist", "data engineer",
+  "data analyst", "devops engineer", "site reliability engineer",
+  "security engineer", "product manager", "product designer",
+  "ux designer", "ui designer", "engineering manager", "tech lead",
+  "marketing manager", "growth", "content", "brand", "demand generation",
+  "sales", "account executive", "sales development", "customer success",
+  "solutions engineer", "recruiter", "talent", "people operations",
+  "finance", "accounting", "operations", "business analyst",
+  "founder", "co-founder", "CEO", "CTO", "COO", "VP engineering",
+  "head of product", "director of engineering", "chief of staff",
+];
+
 export function generateQueries(
   company: string,
-  opts: { maxQueries?: number; role?: string } = {},
+  opts: { maxQueries?: number; role?: string; deep?: boolean } = {},
 ): string[] {
-  const max = opts.maxQueries ?? 30;
+  const max = opts.maxQueries ?? (opts.deep ? 250 : 30);
   const seen = new Set<string>();
   const queries: string[] = [];
   const SITE = "site:linkedin.com/in/";
@@ -75,31 +93,35 @@ export function generateQueries(
     if (!seen.has(n)) { seen.add(n); queries.push(q); }
   }
 
-  const locs = ALL_LOCATIONS.slice(0, 12);
-  const levels = SENIORITY.slice(0, 5);
+  // In deep mode use the full location/seniority lists for maximum coverage.
+  const locs = opts.deep ? ALL_LOCATIONS : ALL_LOCATIONS.slice(0, 12);
+  const levels = opts.deep ? SENIORITY : SENIORITY.slice(0, 5);
 
   if (opts.role) {
     const intent = parseSearchIntent(opts.role);
     for (const t of intent.titles) {
       add(`${SITE} "${company}" "${t}"`);
-      for (const l of locs.slice(0, 5)) add(`${SITE} "${company}" "${t}" "${l}"`);
+      for (const l of locs.slice(0, opts.deep ? locs.length : 5)) {
+        add(`${SITE} "${company}" "${t}" "${l}"`);
+      }
       for (const lv of levels) add(`${SITE} "${company}" "${lv} ${t}"`);
     }
   }
 
-  // Generic company queries
-  add(`${SITE} "${company}" engineer`);
-  add(`${SITE} "${company}" developer`);
-  add(`${SITE} "${company}" product manager`);
-  add(`${SITE} "${company}" data scientist`);
-  add(`${SITE} "${company}" designer`);
-  add(`${SITE} "${company}" marketing`);
-  add(`${SITE} "${company}" sales`);
-  add(`${SITE} "${company}" operations`);
-  for (const lv of levels) add(`${SITE} "${company}" "${lv}" engineer`);
-  for (const l of locs.slice(0, 6)) add(`${SITE} "${company}" "${l}"`);
+  // Department fan-out: bare, by seniority, and by location.
+  const deptList = opts.deep ? DEPARTMENTS : DEPARTMENTS.slice(0, 10);
+  for (const dept of deptList) {
+    add(`${SITE} "${company}" "${dept}"`);
+    if (opts.deep) {
+      for (const lv of levels.slice(0, 4)) add(`${SITE} "${company}" "${lv} ${dept}"`);
+      for (const l of locs.slice(0, 6)) add(`${SITE} "${company}" "${dept}" "${l}"`);
+    }
+  }
 
-  // Shuffle
+  // Pure location sweep — catches employees we'd otherwise miss.
+  for (const l of locs) add(`${SITE} "${company}" "${l}"`);
+
+  // Shuffle so we don't exhaust the API on one department before others.
   for (let i = queries.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [queries[i], queries[j]] = [queries[j], queries[i]];

@@ -1,5 +1,5 @@
-import { searchBrave, type SearchResult } from "./brave";
-import { generateQueries, parseSearchIntent } from "./query-engine";
+import { searchBraveDeep, type SearchResult } from "./brave";
+import { generateQueries, generateAIQueries } from "./query-engine";
 import {
   upsertProfile, profileUrlExists,
   createSearch, updateSearch,
@@ -32,18 +32,44 @@ function parseResult(sr: SearchResult, company: string, query: string, searchId:
 
 export async function runScrape(opts: {
   companies: string[];
+  role?: string;
   queriesPerCompany?: number;
-  targetPerCompany?: number;
+  targetPerCompany?: number | null;
+  maxResultsPerQuery?: number;
   delayMs?: number;
+  deep?: boolean;
+  useAI?: boolean;
   onProgress?: (p: ScrapeProgress) => void;
 }): Promise<ScrapeProgress> {
   const braveKey = process.env.BRAVE_API_KEY || "";
   if (!braveKey) throw new Error("BRAVE_API_KEY not set");
 
   const companiesList = opts.companies;
-  const queriesPerCompany = opts.queriesPerCompany ?? 20;
-  const targetPerCompany = opts.targetPerCompany ?? 50;
-  const delayMs = opts.delayMs ?? 600;
+  const deep = opts.deep ?? true;
+  const queriesPerCompany = opts.queriesPerCompany ?? (deep ? 150 : 30);
+  // null / 0 = no cap → grab every unique profile we can find per company
+  const targetPerCompany =
+    opts.targetPerCompany === null || opts.targetPerCompany === 0
+      ? Infinity
+      : opts.targetPerCompany ?? Infinity;
+  const maxResultsPerQuery = opts.maxResultsPerQuery ?? 120;
+  const delayMs = opts.delayMs ?? 300;
+  const useAI = opts.useAI ?? false;
+
+  // Pre-generate AI queries for all companies in one shot when enabled.
+  let aiQueriesByCompany = new Map<string, string[]>();
+  if (useAI && opts.role) {
+    try {
+      const ai = await generateAIQueries({
+        role: opts.role,
+        companies: companiesList,
+        maxQueriesPerCompany: Math.min(queriesPerCompany, 40),
+      });
+      aiQueriesByCompany = new Map(ai.map((a) => [a.company, a.queries]));
+    } catch {
+      // fall back silently to static queries
+    }
+  }
 
   // Generate all queries upfront
   const totalQueries = companiesList.length * queriesPerCompany;
@@ -72,7 +98,22 @@ export async function runScrape(opts: {
 
   try {
     for (const company of companiesList) {
-      const queries = generateQueries(company, { maxQueries: queriesPerCompany });
+      // Blend AI-generated queries with the expanded static matrix, dedup.
+      const staticQueries = generateQueries(company, {
+        maxQueries: queriesPerCompany,
+        role: opts.role,
+        deep,
+      });
+      const aiQueries = aiQueriesByCompany.get(company) ?? [];
+      const merged: string[] = [];
+      const seenQ = new Set<string>();
+      for (const q of [...aiQueries, ...staticQueries]) {
+        const key = q.toLowerCase().trim();
+        if (seenQ.has(key)) continue;
+        seenQ.add(key);
+        merged.push(q);
+      }
+      const queries = merged.slice(0, queriesPerCompany);
       let foundForCompany = 0;
 
       for (const query of queries) {
@@ -81,7 +122,10 @@ export async function runScrape(opts: {
 
         let results: SearchResult[] = [];
         try {
-          results = await searchBrave(query, braveKey, 0, 20);
+          results = await searchBraveDeep(query, braveKey, {
+            maxResults: maxResultsPerQuery,
+            delayMs: 1100,
+          });
         } catch {
           await new Promise((r) => setTimeout(r, 3000));
           continue;

@@ -6,7 +6,16 @@ export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
-  const { role, companies: companiesOverride, queriesPerCompany, targetPerCompany, delayMs } = body;
+  const {
+    role,
+    companies: companiesOverride,
+    queriesPerCompany,
+    targetPerCompany,
+    maxResultsPerQuery,
+    delayMs,
+    deep,
+    useAI,
+  } = body;
 
   if (!process.env.BRAVE_API_KEY)
     return NextResponse.json({ error: "BRAVE_API_KEY not configured" }, { status: 500 });
@@ -32,9 +41,14 @@ export async function POST(req: NextRequest) {
       try {
         const result = await runScrape({
           companies,
-          queriesPerCompany: queriesPerCompany ?? 20,
-          targetPerCompany: targetPerCompany ?? 50,
-          delayMs: delayMs ?? 600,
+          role,
+          queriesPerCompany: queriesPerCompany ?? (deep === false ? 30 : 150),
+          // null = no cap (grab everything we can find per company)
+          targetPerCompany: targetPerCompany === undefined ? null : targetPerCompany,
+          maxResultsPerQuery: maxResultsPerQuery ?? 120,
+          delayMs: delayMs ?? 300,
+          deep: deep ?? true,
+          useAI: useAI ?? Boolean(role),
           onProgress: send,
         });
         send(result);
