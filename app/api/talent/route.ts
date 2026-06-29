@@ -204,11 +204,16 @@ export async function POST(req: NextRequest) {
   }
 
   // Create talent_search record
-  const [tsRow] = await db
-    .insert(talentSearches)
-    .values({ role: role.trim(), location, tiers, status: "running" })
-    .returning();
-  const tsId = tsRow.id;
+  let tsId: number;
+  try {
+    const [tsRow] = await db
+      .insert(talentSearches)
+      .values({ role: role.trim(), location, tiers: tiers as string[], status: "running" })
+      .returning();
+    tsId = tsRow.id;
+  } catch (err) {
+    return new Response(JSON.stringify({ error: "DB insert failed: " + String(err) }), { status: 500 });
+  }
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({

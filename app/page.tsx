@@ -1036,6 +1036,17 @@ function TalentView() {
         signal: abortRef.current.signal,
       });
 
+      if (!res.ok) {
+        const errJson = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
+        const msg = (errJson as { error?: string }).error ?? `HTTP ${res.status}`;
+        if (msg.includes("BRAVE_API_KEY")) {
+          setStatusMsg("BRAVE_API_KEY no configurada — añadela en Settings > Vars del proyecto");
+        } else {
+          setStatusMsg(`Error del servidor: ${msg}`);
+        }
+        setRunning(false);
+        return;
+      }
       if (!res.body) throw new Error("No stream");
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
@@ -1215,6 +1226,25 @@ function TalentView() {
           </button>
         </div>
       </div>
+
+      {/* Error banner — shown when not running and there is an error message */}
+      {!running && statusMsg && !statusMsg.startsWith("Done") && (
+        <div className="glass-card p-4 border border-red-500/30 bg-red-500/5 flex items-start gap-3">
+          <AlertCircle className="h-5 w-5 text-red-400 shrink-0 mt-0.5" />
+          <div className="min-w-0">
+            <p className="text-sm font-medium text-red-300">{statusMsg}</p>
+            {statusMsg.includes("BRAVE_API_KEY") && (
+              <p className="text-xs text-white/40 mt-1">
+                Ve a <strong className="text-white/60">Settings › Vars</strong> en la esquina superior derecha y a&ntilde;ade{" "}
+                <code className="rounded bg-white/10 px-1 py-0.5 text-white/60">BRAVE_API_KEY</code> con tu clave de{" "}
+                <a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer" className="text-cyan-400 underline">
+                  Brave Search API
+                </a>.
+              </p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Live progress */}
       {running && (
