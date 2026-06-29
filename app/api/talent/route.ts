@@ -65,10 +65,19 @@ async function generateTalentQueries(opts: {
   location: string;
   companies: string[];
   totalQueries: number;
+  roleSynonyms?: string[]; // AI-generated synonyms passed in from pre-fetch
 }): Promise<{ query: string; type: "company" | "role" }[]> {
-  const { role, location, companies } = opts;
+  const { role, location, companies, roleSynonyms = [] } = opts;
   const SITE = "site:linkedin.com/in/";
   const { exactPhrases, titles } = normaliseRole(role);
+
+  // Build the full set of role title variants to use in queries.
+  // Deduplicate and cap at 12 variants — more than that creates redundant queries.
+  const allVariants = Array.from(new Set([
+    ...exactPhrases,
+    ...titles,
+    ...roleSynonyms,
+  ])).slice(0, 12);
 
   const queries: { query: string; type: "company" | "role" }[] = [];
   const seen = new Set<string>();
@@ -77,62 +86,38 @@ async function generateTalentQueries(opts: {
     if (!seen.has(k) && k.length > 20) { seen.add(k); queries.push({ query: q, type }); }
   };
 
-  // ── TIER A: Company-only queries — NO role phrase, NO location ──
-  // Each company query can return up to 200 results (10 pages x 20).
-  // With 300 companies = up to 60,000 raw profiles.
-  // The role filter happens AFTER collection in the scorer.
-  for (const company of companies) {
-    add(SITE + " \"" + company + "\"", "company");
-  }
-
-  // ── TIER B: Role-phrase queries — catch people outside our company list ──
-  // No location = global reach. Location variant as secondary.
   const locStr = location ? " \"" + location + "\"" : "";
-  for (const phrase of exactPhrases) {
-    add(SITE + " \"" + phrase + "\"", "role");
-    if (location) add(SITE + " \"" + phrase + "\"" + locStr, "role");
-  }
-  for (const title of titles) {
-    add(SITE + " \"" + title + "\"", "role");
-    if (location) add(SITE + " \"" + title + "\"" + locStr, "role");
+
+  // ── TIER A: Role variant × Company ──────────────────────────────────────────
+  // The core strategy: for every role variant (synonym) and every company,
+  // generate one query. Brave finds different profiles for each variant.
+  // e.g. "Palantir" "FDE", "Palantir" "Forward Deployed Engineer", "Palantir" "Field Engineer"
+  // With 12 variants × 300 companies = 3,600 queries × ~20 results = 72,000 raw profiles.
+  for (const variant of allVariants) {
+    for (const company of companies) {
+      add(SITE + " \"" + company + "\" \"" + variant + "\"", "company");
+    }
   }
 
-  // ── TIER C: AI-generated role queries for synonym coverage ──
-  try {
-    const companySample = companies.slice(0, 20).join(", ");
-    const res = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: "Bearer " + (process.env.AI_GATEWAY_API_KEY ?? ""),
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              "You are an expert LinkedIn talent sourcer. " +
-              "Generate LinkedIn search queries using role title synonyms. " +
-              "Format: site:linkedin.com/in/ \"Title Synonym\" " +
-              "or site:linkedin.com/in/ \"Company\" \"Title Synonym\". " +
-              "Return ONLY raw queries, one per line. No numbering.",
-          },
-          { role: "user", content: buildPromptQueryGen(role, location, companySample) },
-        ],
-        temperature: 0.8,
-        max_tokens: 1500,
-      }),
-    });
-    if (res.ok) {
-      const data = (await res.json()) as { choices: Array<{ message: { content: string } }> };
-      const text = data.choices[0]?.message?.content ?? "";
-      for (const line of text.split("\n")) {
-        const q = line.trim().replace(/^\d+\.\s*/, "");
-        if (q.toLowerCase().startsWith("site:linkedin.com/in/")) add(q, "role");
+  // ── TIER B: Role variant only (no company) — global + location sweep ────────
+  // Catches people at companies not in our list.
+  for (const variant of allVariants) {
+    add(SITE + " \"" + variant + "\"", "role");
+    if (location) add(SITE + " \"" + variant + "\"" + locStr, "role");
+  }
+
+  // ── TIER C: Seniority prefix × variant × company (top companies only) ───────
+  // Adds "Senior", "Staff", "Lead" prefix variations for top-tier companies.
+  const seniorityPrefixes = ["Senior ", "Staff ", "Lead ", "Principal "];
+  const topCompanies = companies.slice(0, 30);
+  for (const prefix of seniorityPrefixes) {
+    for (const variant of allVariants.slice(0, 4)) {
+      add(SITE + " \"" + prefix + variant + "\"", "role");
+      for (const company of topCompanies) {
+        add(SITE + " \"" + company + "\" \"" + prefix + variant + "\"", "company");
       }
     }
-  } catch { /* bonus */ }
+  }
 
   return queries.slice(0, opts.totalQueries);
 }
@@ -241,19 +226,8 @@ export async function POST(req: NextRequest) {
         const tieredCos = getCompaniesByTier(tiers as CompanyTier[]);
         const companyNames = tieredCos.map((c) => c.name);
 
-        send({ type: "status", message: "Generating queries for " + companyNames.length + " companies (" + tiers.join("/") + ")..." });
-
-        const queryList = await generateTalentQueries({
-          role,
-          location,
-          companies: companyNames,
-          totalQueries: queriesTotal,
-        });
-
-        send({ type: "status", message: "Running " + queryList.length + " searches (" + companyNames.length + " companies)...", queriesTotal: queryList.length });
-
-        // ── Pre-fetch AI synonyms BEFORE the collection loop ──
-        // This lets us filter partials correctly during streaming, not just at the end.
+        // ── Step 1: Fetch AI synonyms first ──────────────────────────────────────
+        // Used both to generate diverse queries AND to filter results after collection.
         send({ type: "status", message: "Expanding role synonyms..." });
         let aiSynonyms: string[] = [];
         try {
@@ -292,6 +266,16 @@ export async function POST(req: NextRequest) {
           }
         } catch { /* use static synonyms from normaliseRole */ }
 
+        // ── Step 2: Generate queries using synonyms ───────────────────────────
+        send({ type: "status", message: "Generating queries for " + companyNames.length + " companies..." });
+        const queryList = await generateTalentQueries({
+          role,
+          location,
+          companies: companyNames,
+          totalQueries: queriesTotal,
+          roleSynonyms: aiSynonyms,
+        });
+
         // ── Phase 1: COLLECT — no filtering during collection ──
         // Company queries paginate up to 10 pages (200 results each) = thousands of profiles.
         // Role queries paginate 2 pages max — used to catch people at unlisted companies.
@@ -306,10 +290,11 @@ export async function POST(req: NextRequest) {
 
           let results;
           try {
-            // Company queries: full 10-page pagination (up to 200 results each)
-            // Role queries: 2 pages max (role-phrase results are usually exhausted quickly)
+            // Role+company queries: 2 pages (up to 40 results, all role-relevant)
+            // Role-only queries: 2 pages (global sweep)
+            // Both types now have the role in the query so results are pre-filtered by Brave.
             results = await searchBraveDeep(q, braveKey, {
-              maxPages: qType === "company" ? 10 : 2,
+              maxPages: 2,
               delayMs: 700,
             });
           } catch {
