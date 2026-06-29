@@ -1,4 +1,4 @@
-import type { Metadata, Viewport } from "next";
+import type { Metadata } from "next";
 import { Toaster } from "sonner";
 import "./globals.css";
 
@@ -7,16 +7,13 @@ export const metadata: Metadata = {
   description: "AI-powered LinkedIn profile discovery at scale",
 };
 
-export const viewport: Viewport = {
-  width: "device-width",
-  initialScale: 1,
-  maximumScale: 1,
-  themeColor: "#0a0a0f",
-};
-
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en" className="dark">
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+        <meta name="theme-color" content="#0a0a0f" />
+      </head>
       <body className="min-h-screen antialiased grid-bg">
         <div className="gradient-orb top-[-200px] left-[-200px]" />
         <div className="gradient-orb bottom-[-200px] right-[-200px]" style={{ background: "radial-gradient(circle, rgba(168,85,247,0.06), transparent 70%)" }} />
