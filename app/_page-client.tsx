@@ -1017,6 +1017,8 @@ function TalentView() {
   const [aiRerank, setAiRerank] = useState(true);
   const [running, setRunning] = useState(false);
   const [statusMsg, setStatusMsg] = useState("");
+  // Detect PDL from first status message that mentions "People Data Labs"
+  const [pdlActive, setPdlActive] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0, found: 0 });
   const [results, setResults] = useState<TalentProfile[]>([]);
   const [clusters, setClusters] = useState<ClusterSummary[]>([]);
@@ -1027,6 +1029,14 @@ function TalentView() {
   const [showFilters, setShowFilters] = useState(false);
   const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Detect active provider on mount so UI renders correctly before first search
+  useEffect(() => {
+    fetch("/api/config")
+      .then((r) => r.json())
+      .then((cfg: { pdl?: boolean }) => { if (cfg.pdl) setPdlActive(true); })
+      .catch(() => {});
+  }, []);
 
   const toggleTier = (t: CompanyTier) =>
     setSelectedTiers((prev) => prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]);
@@ -1076,7 +1086,10 @@ function TalentView() {
           if (!line.startsWith("data: ")) continue;
           try {
             const evt = JSON.parse(line.slice(6)) as TalentEvent;
-            if (evt.type === "status" && evt.message) setStatusMsg(evt.message);
+            if (evt.type === "status" && evt.message) {
+              setStatusMsg(evt.message);
+              if (evt.message.includes("People Data Labs")) setPdlActive(true);
+            }
             if (evt.type === "progress") {
               setProgress({ done: evt.queriesDone ?? 0, total: evt.queriesTotal ?? 0, found: evt.profilesFound ?? 0 });
             }
@@ -1192,18 +1205,21 @@ function TalentView() {
 
         {/* Config row */}
         <div className="flex flex-wrap items-center gap-4">
-          <div className="flex items-center gap-3">
-            <label className="label mb-0 whitespace-nowrap">Queries</label>
-            <input
-              type="number"
-              value={queriesTotal}
-              onChange={(e) => setQueriesTotal(Number(e.target.value))}
-              min={20}
-              max={300}
-              className="input-field w-24 text-center"
-              disabled={running}
-            />
-          </div>
+          {/* Queries input — only relevant for SERP mode, hidden when PDL is active */}
+          {!pdlActive && (
+            <div className="flex items-center gap-3">
+              <label className="label mb-0 whitespace-nowrap">Queries</label>
+              <input
+                type="number"
+                value={queriesTotal}
+                onChange={(e) => setQueriesTotal(Number(e.target.value))}
+                min={20}
+                max={300}
+                className="input-field w-24 text-center"
+                disabled={running}
+              />
+            </div>
+          )}
           <button
             onClick={() => setAiRerank(!aiRerank)}
             disabled={running}
@@ -1214,6 +1230,13 @@ function TalentView() {
             <Brain className="h-4 w-4" />
             AI Re-ranking {aiRerank ? "On" : "Off"}
           </button>
+          {/* Provider badge */}
+          {pdlActive && (
+            <span className="ml-auto flex items-center gap-1.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              People Data Labs
+            </span>
+          )}
         </div>
 
         {/* Action */}
@@ -1240,11 +1263,21 @@ function TalentView() {
             <p className="text-sm font-medium text-red-300">{statusMsg}</p>
             {statusMsg.includes("BRAVE_API_KEY") && (
               <p className="text-xs text-white/40 mt-1">
-                Ve a <strong className="text-white/60">Settings › Vars</strong> en la esquina superior derecha y a&ntilde;ade{" "}
+                Ve a <strong className="text-white/60">Settings › Vars</strong> y a&ntilde;ade{" "}
                 <code className="rounded bg-white/10 px-1 py-0.5 text-white/60">BRAVE_API_KEY</code> con tu clave de{" "}
-                <a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer" className="text-cyan-400 underline">
-                  Brave Search API
-                </a>.
+                <a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer" className="text-cyan-400 underline">Brave Search API</a>.
+              </p>
+            )}
+            {statusMsg.includes("PDL") && statusMsg.includes("invalid API key") && (
+              <p className="text-xs text-white/40 mt-1">
+                Ve a <strong className="text-white/60">Settings › Vars</strong> y comprueba que{" "}
+                <code className="rounded bg-white/10 px-1 py-0.5 text-white/60">PDL_API_KEY</code> es correcta.{" "}
+                Consigue una en <a href="https://peopledatalabs.com" target="_blank" rel="noopener noreferrer" className="text-cyan-400 underline">peopledatalabs.com</a>.
+              </p>
+            )}
+            {statusMsg.includes("PDL") && statusMsg.includes("credits") && (
+              <p className="text-xs text-white/40 mt-1">
+                Tu cuenta de PDL se ha quedado sin cr&eacute;ditos. La b&uacute;squeda intentar&aacute; continuar con SERP.
               </p>
             )}
           </div>
