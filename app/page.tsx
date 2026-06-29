@@ -6,7 +6,8 @@ import {
   ArrowRight, ExternalLink, TrendingUp, Activity,
   Loader2, CheckCircle2, XCircle, Plus, Trash2,
   Upload, RefreshCw, Globe, BarChart3, ChevronRight,
-  AlertCircle,
+  AlertCircle, Trophy, MapPin, Star, Brain, ChevronDown,
+  Filter, SlidersHorizontal, Flame,
 } from "lucide-react";
 
 // ── Types ──────────────────────────────────────────────────────
@@ -57,7 +58,32 @@ interface ScrapeProgress {
   status: "running" | "completed" | "error";
 }
 
-type Tab = "dashboard" | "companies" | "search" | "results";
+type Tab = "dashboard" | "companies" | "search" | "results" | "talent";
+
+type CompanyTier = "S" | "A" | "B" | "Mega";
+
+interface TalentProfile {
+  name: string;
+  title: string;
+  company: string;
+  linkedinUrl: string;
+  location: string;
+  score: number;
+  companyTier: CompanyTier | null;
+  matchReasons: string[];
+  snippet: string;
+}
+
+interface TalentEvent {
+  type: "status" | "progress" | "done" | "error";
+  message?: string;
+  queriesDone?: number;
+  queriesTotal?: number;
+  profilesFound?: number;
+  profiles?: TalentProfile[];
+  total?: number;
+  searchId?: number;
+}
 
 // ── Main App ───────────────────────────────────────────────────
 
@@ -82,10 +108,11 @@ export default function HomePage() {
     }
   }, [progress?.status, loadStats]);
 
-  const navItems: { id: Tab; label: string; icon: React.ReactNode }[] = [
+  const navItems: { id: Tab; label: string; icon: React.ReactNode; badge?: string }[] = [
     { id: "dashboard", label: "Dashboard", icon: <BarChart3 className="h-4 w-4" /> },
+    { id: "talent", label: "Top Talent", icon: <Trophy className="h-4 w-4" />, badge: "NEW" },
     { id: "companies", label: "Companies", icon: <Building2 className="h-4 w-4" /> },
-    { id: "search", label: "New Search", icon: <Sparkles className="h-4 w-4" /> },
+    { id: "search", label: "Bulk Search", icon: <Sparkles className="h-4 w-4" /> },
     { id: "results", label: "Results", icon: <Users className="h-4 w-4" /> },
   ];
 
@@ -107,12 +134,17 @@ export default function HomePage() {
               <button
                 key={item.id}
                 onClick={() => { setTab(item.id); if (item.id === "dashboard") loadStats(); }}
-                className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all ${
+                className={`relative flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all ${
                   tab === item.id ? "bg-white/10 text-white" : "text-white/40 hover:text-white/70"
                 }`}
               >
                 {item.icon}
                 {item.label}
+                {item.badge && (
+                  <span className="rounded-sm bg-cyan-500/20 px-1 py-0.5 text-[9px] font-bold uppercase tracking-widest text-cyan-400">
+                    {item.badge}
+                  </span>
+                )}
               </button>
             ))}
           </nav>
@@ -136,6 +168,7 @@ export default function HomePage() {
             onRefresh={loadStats}
           />
         )}
+        {tab === "talent" && <TalentView />}
         {tab === "companies" && <CompaniesView />}
         {tab === "search" && (
           <SearchView
@@ -925,6 +958,471 @@ function ResultsView() {
             <button onClick={() => setPage((p) => p + 1)} disabled={(page + 1) * limit >= total} className="btn-secondary text-sm px-3 py-1.5 disabled:opacity-30">
               Next
             </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Talent View ────────────────────────────────────────────────
+
+const TIER_CONFIG: Record<string, { label: string; color: string; bg: string; border: string; glow: string; icon: string }> = {
+  S: { label: "Tier S", color: "text-amber-300", bg: "bg-amber-500/10", border: "border-amber-500/30", glow: "shadow-amber-500/20", icon: "★" },
+  A: { label: "Tier A", color: "text-slate-300", bg: "bg-slate-500/10", border: "border-slate-500/30", glow: "shadow-slate-500/10", icon: "◆" },
+  B: { label: "Tier B", color: "text-orange-400", bg: "bg-orange-500/10", border: "border-orange-500/30", glow: "shadow-orange-500/10", icon: "●" },
+  Mega: { label: "Mega", color: "text-violet-400", bg: "bg-violet-500/10", border: "border-violet-500/30", glow: "shadow-violet-500/20", icon: "⬡" },
+};
+
+function TierBadge({ tier }: { tier: string | null }) {
+  if (!tier) return null;
+  const cfg = TIER_CONFIG[tier];
+  if (!cfg) return null;
+  return (
+    <span className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${cfg.color} ${cfg.bg} ${cfg.border}`}>
+      <span className="text-[8px]">{cfg.icon}</span>
+      {cfg.label}
+    </span>
+  );
+}
+
+function ScoreBar({ score }: { score: number }) {
+  const color = score >= 70 ? "bg-emerald-500" : score >= 45 ? "bg-amber-500" : "bg-slate-500";
+  return (
+    <div className="flex items-center gap-2">
+      <div className="h-1.5 w-20 rounded-full bg-white/5 overflow-hidden">
+        <div className={`h-full rounded-full transition-all duration-700 ${color}`} style={{ width: `${score}%` }} />
+      </div>
+      <span className={`text-xs font-bold tabular-nums ${score >= 70 ? "text-emerald-400" : score >= 45 ? "text-amber-400" : "text-white/30"}`}>
+        {score}
+      </span>
+    </div>
+  );
+}
+
+function TalentView() {
+  const [role, setRole] = useState("");
+  const [location, setLocation] = useState("");
+  const [selectedTiers, setSelectedTiers] = useState<CompanyTier[]>(["S", "A", "Mega"]);
+  const [queriesTotal, setQueriesTotal] = useState(80);
+  const [aiRerank, setAiRerank] = useState(true);
+  const [running, setRunning] = useState(false);
+  const [statusMsg, setStatusMsg] = useState("");
+  const [progress, setProgress] = useState({ done: 0, total: 0, found: 0 });
+  const [results, setResults] = useState<TalentProfile[]>([]);
+  const [filterTier, setFilterTier] = useState<CompanyTier | "all">("all");
+  const [minScore, setMinScore] = useState(0);
+  const [showFilters, setShowFilters] = useState(false);
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+
+  const toggleTier = (t: CompanyTier) =>
+    setSelectedTiers((prev) => prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]);
+
+  async function handleSearch() {
+    if (!role.trim() || running) return;
+    setRunning(true);
+    setResults([]);
+    setStatusMsg("Initialising...");
+    setProgress({ done: 0, total: 0, found: 0 });
+    setExpandedIdx(null);
+
+    abortRef.current = new AbortController();
+    try {
+      const res = await fetch("/api/talent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role, location, tiers: selectedTiers, queriesTotal, aiRerank }),
+        signal: abortRef.current.signal,
+      });
+
+      if (!res.body) throw new Error("No stream");
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const evt = JSON.parse(line.slice(6)) as TalentEvent;
+            if (evt.type === "status" && evt.message) setStatusMsg(evt.message);
+            if (evt.type === "progress") {
+              setProgress({ done: evt.queriesDone ?? 0, total: evt.queriesTotal ?? 0, found: evt.profilesFound ?? 0 });
+            }
+            if (evt.type === "done") {
+              setResults(evt.profiles ?? []);
+              setStatusMsg(`Done — ${evt.total ?? 0} profiles ranked`);
+              setRunning(false);
+            }
+            if (evt.type === "error") {
+              setStatusMsg(`Error: ${evt.message}`);
+              setRunning(false);
+            }
+          } catch {}
+        }
+      }
+    } catch (e: unknown) {
+      if ((e as Error)?.name !== "AbortError") setStatusMsg("Connection lost");
+      setRunning(false);
+    }
+  }
+
+  function handleStop() {
+    abortRef.current?.abort();
+    setRunning(false);
+    setStatusMsg("Stopped");
+  }
+
+  const filtered = results.filter((p) => {
+    if (filterTier !== "all" && p.companyTier !== filterTier) return false;
+    if (p.score < minScore) return false;
+    return true;
+  });
+
+  const tierCounts = results.reduce<Record<string, number>>((acc, p) => {
+    if (p.companyTier) acc[p.companyTier] = (acc[p.companyTier] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  return (
+    <div className="space-y-6 animate-fade-in">
+      {/* Header */}
+      <div className="flex items-start justify-between">
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <Trophy className="h-5 w-5 text-amber-400" />
+            <h2 className="text-2xl font-bold tracking-tight">Top Talent Search</h2>
+          </div>
+          <p className="text-white/40 text-sm">
+            AI-powered LinkedIn sourcing across {["S","A","B","Mega"].map(t => TIER_CONFIG[t].label).join(" / ")} companies. Scored + AI re-ranked.
+          </p>
+        </div>
+        {results.length > 0 && (
+          <a
+            href={`data:text/csv;charset=utf-8,${encodeURIComponent(
+              ["Rank,Name,Title,Company,Tier,Score,Location,LinkedIn"].concat(
+                filtered.map((p, i) =>
+                  [i+1, `"${p.name}"`, `"${p.title}"`, `"${p.company}"`, p.companyTier ?? "", p.score, `"${p.location}"`, p.linkedinUrl].join(",")
+                )
+              ).join("\n")
+            )}`}
+            download="top-talent.csv"
+            className="btn-secondary text-sm"
+          >
+            <Download className="h-4 w-4" /> Export CSV
+          </a>
+        )}
+      </div>
+
+      {/* Search Form */}
+      <div className="glass-card p-6 space-y-5">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label className="label">Role / What you&apos;re looking for</label>
+            <input
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) handleSearch(); }}
+              placeholder="e.g. Forward Deployed Engineer, AI Product Manager..."
+              className="input-field"
+              disabled={running}
+            />
+          </div>
+          <div>
+            <label className="label">Location (optional)</label>
+            <div className="relative">
+              <MapPin className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/20" />
+              <input
+                value={location}
+                onChange={(e) => setLocation(e.target.value)}
+                placeholder="e.g. San Francisco, Remote, New York..."
+                className="input-field pl-10"
+                disabled={running}
+              />
+            </div>
+          </div>
+        </div>
+
+        {/* Tier selector */}
+        <div>
+          <label className="label">Company tiers to search</label>
+          <div className="flex flex-wrap gap-2">
+            {(["S", "A", "B", "Mega"] as CompanyTier[]).map((t) => {
+              const cfg = TIER_CONFIG[t];
+              const active = selectedTiers.includes(t);
+              return (
+                <button
+                  key={t}
+                  onClick={() => toggleTier(t)}
+                  disabled={running}
+                  className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 text-xs font-semibold transition-all ${
+                    active ? `${cfg.color} ${cfg.bg} ${cfg.border}` : "border-white/10 text-white/30 hover:text-white/50"
+                  }`}
+                >
+                  <span>{cfg.icon}</span>
+                  {cfg.label}
+                  {active && t === "S" && <Flame className="h-3 w-3" />}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Config row */}
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="flex items-center gap-3">
+            <label className="label mb-0 whitespace-nowrap">Queries</label>
+            <input
+              type="number"
+              value={queriesTotal}
+              onChange={(e) => setQueriesTotal(Number(e.target.value))}
+              min={20}
+              max={300}
+              className="input-field w-24 text-center"
+              disabled={running}
+            />
+          </div>
+          <button
+            onClick={() => setAiRerank(!aiRerank)}
+            disabled={running}
+            className={`flex items-center gap-2 rounded-lg border px-4 py-2.5 text-sm font-medium transition-all ${
+              aiRerank ? "border-violet-500/30 bg-violet-500/10 text-violet-300" : "border-white/10 text-white/30 hover:text-white/60"
+            }`}
+          >
+            <Brain className="h-4 w-4" />
+            AI Re-ranking {aiRerank ? "On" : "Off"}
+          </button>
+        </div>
+
+        {/* Action */}
+        <div className="flex gap-3">
+          <button
+            onClick={running ? handleStop : handleSearch}
+            disabled={!role.trim() && !running}
+            className={`flex-1 btn-primary justify-center text-base font-semibold py-3 ${running ? "bg-red-600 hover:bg-red-500 shadow-red-500/20" : ""}`}
+          >
+            {running ? (
+              <><XCircle className="h-5 w-5" /> Stop Search</>
+            ) : (
+              <><Trophy className="h-5 w-5" /> Find Top Talent</>
+            )}
+          </button>
+        </div>
+      </div>
+
+      {/* Live progress */}
+      {running && (
+        <div className="glass-card p-5 border border-cyan-500/20">
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <div className="h-2 w-2 rounded-full bg-cyan-400 live-dot" />
+              <span className="text-sm font-medium text-cyan-300">Searching...</span>
+            </div>
+            <span className="text-xs text-white/30 font-mono">{progress.found} profiles found</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-white/5 overflow-hidden mb-2">
+            <div
+              className="h-full rounded-full bg-gradient-to-r from-cyan-500 to-violet-500 transition-all duration-500"
+              style={{ width: progress.total > 0 ? `${Math.round((progress.done / progress.total) * 100)}%` : "5%" }}
+            />
+          </div>
+          <div className="flex items-center justify-between text-xs text-white/30">
+            <span className="truncate max-w-sm">{statusMsg}</span>
+            {progress.total > 0 && <span className="shrink-0 ml-2">{progress.done}/{progress.total} queries</span>}
+          </div>
+        </div>
+      )}
+
+      {/* Results */}
+      {results.length > 0 && (
+        <div className="space-y-4">
+          {/* Tier breakdown + filters */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => setFilterTier("all")}
+                className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-all ${filterTier === "all" ? "border-white/20 bg-white/10 text-white" : "border-white/10 text-white/30 hover:text-white/60"}`}
+              >
+                All ({results.length})
+              </button>
+              {(["S", "Mega", "A", "B"] as CompanyTier[]).map((t) => {
+                const cfg = TIER_CONFIG[t];
+                const cnt = tierCounts[t] ?? 0;
+                if (!cnt) return null;
+                return (
+                  <button
+                    key={t}
+                    onClick={() => setFilterTier(filterTier === t ? "all" : t)}
+                    className={`flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-all ${
+                      filterTier === t ? `${cfg.color} ${cfg.bg} ${cfg.border}` : "border-white/10 text-white/30 hover:text-white/50"
+                    }`}
+                  >
+                    <span>{cfg.icon}</span> {cfg.label} ({cnt})
+                  </button>
+                );
+              })}
+            </div>
+            <button
+              onClick={() => setShowFilters(!showFilters)}
+              className="flex items-center gap-1.5 text-xs text-white/30 hover:text-white/60 transition-colors"
+            >
+              <SlidersHorizontal className="h-3.5 w-3.5" />
+              Filters
+              <ChevronDown className={`h-3 w-3 transition-transform ${showFilters ? "rotate-180" : ""}`} />
+            </button>
+          </div>
+
+          {showFilters && (
+            <div className="glass-card p-4 flex items-center gap-4">
+              <label className="label mb-0 whitespace-nowrap">Min score</label>
+              <input
+                type="range"
+                min={0}
+                max={90}
+                step={5}
+                value={minScore}
+                onChange={(e) => setMinScore(Number(e.target.value))}
+                className="flex-1 accent-cyan-500"
+              />
+              <span className="text-sm font-mono text-white/60 w-8">{minScore}</span>
+            </div>
+          )}
+
+          {/* Ranking table */}
+          <div className="glass-card overflow-hidden">
+            <div className="grid grid-cols-[40px_1fr_auto_auto] items-center gap-0 border-b border-white/5 px-5 py-3 text-[10px] font-semibold uppercase tracking-wider text-white/25">
+              <span>#</span>
+              <span>Profile</span>
+              <span className="text-right pr-6">Tier</span>
+              <span className="text-right">Score</span>
+            </div>
+            <div className="divide-y divide-white/[0.04]">
+              {filtered.slice(0, 200).map((p, i) => {
+                const isExpanded = expandedIdx === i;
+                const tierCfg = p.companyTier ? TIER_CONFIG[p.companyTier] : null;
+                const rank = i + 1;
+                const rankColor = rank === 1 ? "text-amber-400" : rank === 2 ? "text-slate-300" : rank === 3 ? "text-orange-400" : "text-white/20";
+                return (
+                  <div key={p.linkedinUrl}>
+                    <button
+                      onClick={() => setExpandedIdx(isExpanded ? null : i)}
+                      className="w-full grid grid-cols-[40px_1fr_auto_auto] items-center gap-0 px-5 py-4 text-left hover:bg-white/[0.025] transition-colors group"
+                    >
+                      {/* Rank */}
+                      <span className={`text-sm font-bold tabular-nums ${rankColor}`}>
+                        {rank <= 3 ? ["🥇","🥈","🥉"][rank-1] : rank}
+                      </span>
+
+                      {/* Profile info */}
+                      <div className="min-w-0 pr-4">
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <span className="font-semibold text-sm text-white/90 truncate">
+                            {p.name || p.title.split(" - ")[0] || "Unknown"}
+                          </span>
+                          {p.location && (
+                            <span className="hidden sm:flex items-center gap-1 text-[10px] text-white/30 shrink-0">
+                              <MapPin className="h-2.5 w-2.5" /> {p.location}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-white/40 truncate">{p.title}</div>
+                        <div className="text-xs text-white/25 truncate">{p.company}</div>
+                      </div>
+
+                      {/* Tier badge */}
+                      <div className="pr-4">
+                        {tierCfg ? (
+                          <span className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-bold whitespace-nowrap ${tierCfg.color} ${tierCfg.bg} ${tierCfg.border}`}>
+                            <span className="text-[8px]">{tierCfg.icon}</span>
+                            {tierCfg.label}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] text-white/15">—</span>
+                        )}
+                      </div>
+
+                      {/* Score */}
+                      <div className="flex flex-col items-end gap-1">
+                        <ScoreBar score={p.score} />
+                        <ChevronDown className={`h-3 w-3 text-white/20 transition-transform ${isExpanded ? "rotate-180" : ""}`} />
+                      </div>
+                    </button>
+
+                    {/* Expanded row */}
+                    {isExpanded && (
+                      <div className="px-5 pb-5 pt-0 border-t border-white/5 bg-black/20">
+                        <div className="flex flex-wrap items-start gap-4 pt-4">
+                          <div className="flex-1 min-w-0 space-y-3">
+                            {p.snippet && (
+                              <p className="text-xs text-white/40 leading-relaxed line-clamp-3">{p.snippet}</p>
+                            )}
+                            {p.matchReasons.length > 0 && (
+                              <div className="flex flex-wrap gap-1.5">
+                                {p.matchReasons.map((r, ri) => (
+                                  <span key={ri} className="rounded bg-white/5 px-2 py-0.5 text-[10px] text-white/40 border border-white/5">
+                                    {r}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                          <div className="flex flex-col items-end gap-2 shrink-0">
+                            <a
+                              href={p.linkedinUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="btn-primary text-xs py-2 px-4"
+                            >
+                              <ExternalLink className="h-3.5 w-3.5" />
+                              View LinkedIn
+                            </a>
+                            {p.location && (
+                              <span className="flex items-center gap-1 text-[10px] text-white/30">
+                                <MapPin className="h-3 w-3" /> {p.location}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {filtered.length > 200 && (
+              <div className="px-5 py-3 border-t border-white/5 text-xs text-white/25 text-center">
+                Showing top 200 of {filtered.length} results
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Empty state */}
+      {!running && results.length === 0 && (
+        <div className="glass-card p-16 text-center">
+          <Trophy className="h-14 w-14 text-amber-500/20 mx-auto mb-5" />
+          <h3 className="text-lg font-semibold mb-2 text-white/70">Find the absolute best</h3>
+          <p className="text-white/30 text-sm max-w-md mx-auto leading-relaxed">
+            Enter a role and location, select which company tiers to search, and let AI find + rank the top LinkedIn talent across{" "}
+            <span className="text-white/50">3,500+ curated companies</span>.
+          </p>
+          <div className="flex items-center justify-center gap-3 mt-6">
+            {(["S", "A", "Mega"] as CompanyTier[]).map((t) => {
+              const cfg = TIER_CONFIG[t];
+              return (
+                <span key={t} className={`rounded-lg border px-3 py-1.5 text-xs font-bold ${cfg.color} ${cfg.bg} ${cfg.border}`}>
+                  {cfg.icon} {cfg.label}
+                </span>
+              );
+            })}
           </div>
         </div>
       )}
