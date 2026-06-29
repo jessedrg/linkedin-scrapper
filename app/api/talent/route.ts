@@ -86,49 +86,51 @@ async function generateTalentQueries(opts: {
     if (!seen.has(k) && k.length > 20) { seen.add(k); queries.push({ query: q, type }); }
   };
 
-  // Build location variants — search the city AND common nearby/metro phrasings.
-  const locationVariants: string[] = [];
+  const seniorityPrefixes = ["", "Senior ", "Staff ", "Lead ", "Principal "];
+
+  // Build UNQUOTED location terms. Unlike a quoted "San Francisco" (which Brave
+  // requires verbatim and almost no snippet contains), unquoted terms are treated
+  // as soft relevance signals: Brave biases toward that geography but still returns
+  // people who list "Bay Area", "SF", etc. We append several metro phrasings.
+  const locationTerms: string[] = [];
   if (location) {
-    locationVariants.push(location);
     const loc = location.toLowerCase();
-    if (loc.includes("san francisco") || loc.includes("sf")) {
-      locationVariants.push("Bay Area", "San Francisco Bay Area", "Silicon Valley");
+    locationTerms.push(location);
+    if (loc.includes("san francisco") || loc.includes("sf") || loc.includes("bay area")) {
+      locationTerms.push("Bay Area", "Silicon Valley");
     } else if (loc.includes("new york") || loc.includes("nyc")) {
-      locationVariants.push("New York City", "Greater New York");
+      locationTerms.push("New York", "NYC");
     } else if (loc.includes("london")) {
-      locationVariants.push("Greater London", "London Area");
+      locationTerms.push("London", "United Kingdom");
+    } else if (loc.includes("los angeles") || loc.includes("la")) {
+      locationTerms.push("Los Angeles", "LA");
     }
   }
 
-  const seniorityPrefixes = ["", "Senior ", "Staff ", "Lead ", "Principal "];
+  // IMPORTANT: queries are emitted in order of PRODUCTIVITY (most results first),
+  // because the final list is capped with slice(0, totalQueries).
 
-  // ── PRIMARY: Title × Location (NO company) ──────────────────────────────────
-  // This is now the main strategy: filter by ROLE + LOCATION, not by company.
-  // The AI then evaluates whether each person's current company is a good startup.
-  // e.g. "Forward Deployed Engineer" "San Francisco", "FDE" "Bay Area", etc.
-  if (locationVariants.length > 0) {
+  // ── PRIMARY: Title + UNQUOTED location — geo-biased, still high yield ────────
+  // Brave ranks local profiles first but does NOT require exact location text,
+  // so we keep volume while strongly favoring the requested area.
+  if (locationTerms.length > 0) {
     for (const variant of allVariants) {
       for (const prefix of seniorityPrefixes) {
-        for (const locV of locationVariants) {
-          add(SITE + " \"" + prefix + variant + "\" \"" + locV + "\"", "role");
-        }
+        add(SITE + " \"" + prefix + variant + "\" " + locationTerms.join(" "), "role");
       }
     }
   }
 
-  // ── SECONDARY: Title only (no company, no location) — global reach ──────────
-  // Catches strong candidates regardless of where they're listed.
+  // ── SECONDARY: Title only (no location) — global reach, catches everyone ────
   for (const variant of allVariants) {
-    for (const prefix of seniorityPrefixes.slice(0, 3)) {
+    for (const prefix of seniorityPrefixes) {
       add(SITE + " \"" + prefix + variant + "\"", "role");
     }
   }
 
-  // ── TERTIARY: Title × top companies — only the very best companies ──────────
-  // A light sweep of elite companies to ensure we don't miss obvious top talent.
-  const topCompanies = companies.slice(0, 40);
-  for (const variant of allVariants.slice(0, 6)) {
-    for (const company of topCompanies) {
+  // ── TERTIARY: Title × company — Brave pre-filters by role + company ──────────
+  for (const variant of allVariants) {
+    for (const company of companies) {
       add(SITE + " \"" + company + "\" \"" + variant + "\"", "company");
     }
   }
