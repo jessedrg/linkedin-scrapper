@@ -736,9 +736,10 @@ function SearchView({
                 min={0}
                 max={2000}
               />
-            </div>
           </div>
-        )}
+        </div>
+      )}
+
 
         <div>
           <label className="label">AI Enhancement</label>
@@ -1110,6 +1111,7 @@ function TalentView() {
   const filtered = results.filter((p) => {
     if (filterTier !== "all" && p.companyTier !== filterTier) return false;
     if (p.score < minScore) return false;
+    if (activeCluster !== null && p.cluster !== activeCluster) return false;
     return true;
   });
 
@@ -1306,6 +1308,43 @@ function TalentView() {
             </a>
           </div>
 
+          {/* View mode toggle + Clusters */}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setViewMode("list")}
+              className={`text-xs rounded-lg border px-3 py-1.5 font-medium transition-all ${viewMode === "list" ? "border-white/20 bg-white/10 text-white" : "border-white/10 text-white/30 hover:text-white/60"}`}
+            >
+              List
+            </button>
+            <button
+              onClick={() => setViewMode("clusters")}
+              className={`text-xs rounded-lg border px-3 py-1.5 font-medium transition-all ${viewMode === "clusters" ? "border-white/20 bg-white/10 text-white" : "border-white/10 text-white/30 hover:text-white/60"}`}
+            >
+              Clusters {clusters.length > 0 && <span className="ml-1 text-white/40">({clusters.length})</span>}
+            </button>
+          </div>
+
+          {/* Cluster pills — visible in both modes to filter by cluster */}
+          {clusters.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => setActiveCluster(null)}
+                className={`text-xs rounded-full border px-3 py-1 transition-all ${activeCluster === null ? "border-brand-500/60 bg-brand-500/10 text-brand-400" : "border-white/10 text-white/30 hover:text-white/60"}`}
+              >
+                All clusters
+              </button>
+              {clusters.map((c) => (
+                <button
+                  key={c.key}
+                  onClick={() => setActiveCluster(activeCluster === c.key ? null : c.key)}
+                  className={`text-xs rounded-full border px-3 py-1 transition-all ${activeCluster === c.key ? "border-brand-500/60 bg-brand-500/10 text-brand-400" : "border-white/10 text-white/30 hover:text-white/60"}`}
+                >
+                  {c.label} <span className="opacity-50">({c.count})</span>
+                </button>
+              ))}
+            </div>
+          )}
+
           {/* Tier breakdown + filters */}
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-2">
@@ -1358,7 +1397,62 @@ function TalentView() {
             </div>
           )}
 
-          {/* Ranking table */}
+          {/* Cluster cards view */}
+          {viewMode === "clusters" && clusters.length > 0 && (
+            <div className="space-y-3">
+              {clusters
+                .filter((c) => activeCluster === null || c.key === activeCluster)
+                .map((c) => {
+                  const clusterProfiles = filtered.filter((p) => p.cluster === c.key);
+                  if (clusterProfiles.length === 0) return null;
+                  return (
+                    <div key={c.key} className="glass-card overflow-hidden">
+                      <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
+                        <span className="text-sm font-semibold text-white/80">{c.label}</span>
+                        <span className="text-xs text-white/30">{clusterProfiles.length} profiles</span>
+                      </div>
+                      {clusterProfiles.slice(0, 10).map((p, i) => (
+                        <div key={p.linkedinUrl} className="flex items-center gap-3 px-4 py-2.5 border-b border-white/[0.03] last:border-0 hover:bg-white/[0.02]">
+                          <span className="text-xs text-white/30 tabular-nums w-5 shrink-0">{i + 1}</span>
+                          <div className="min-w-0 flex-1">
+                            <div className="text-sm font-medium text-white/80 truncate">{p.name}</div>
+                            <div className="text-xs text-white/35 truncate">{p.title} · {p.company}</div>
+                          </div>
+                          {p.location && (
+                            <span className="text-[10px] text-white/25 hidden sm:block shrink-0">{p.location}</span>
+                          )}
+                          <div className="flex items-center gap-2 shrink-0">
+                            {p.companyTier && TIER_CONFIG[p.companyTier as keyof typeof TIER_CONFIG] && (
+                              <span className={`text-[10px] font-bold rounded border px-1.5 py-0.5 ${TIER_CONFIG[p.companyTier as keyof typeof TIER_CONFIG].color} ${TIER_CONFIG[p.companyTier as keyof typeof TIER_CONFIG].bg} ${TIER_CONFIG[p.companyTier as keyof typeof TIER_CONFIG].border}`}>
+                                {TIER_CONFIG[p.companyTier as keyof typeof TIER_CONFIG].label}
+                              </span>
+                            )}
+                            <a
+                              href={p.linkedinUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[10px] text-brand-400/60 hover:text-brand-400 transition-colors"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              LinkedIn
+                            </a>
+                            <span className="text-xs font-mono text-white/40 w-6 text-right">{p.score}</span>
+                          </div>
+                        </div>
+                      ))}
+                      {clusterProfiles.length > 10 && (
+                        <div className="px-4 py-2 text-[11px] text-white/25 text-center">
+                          +{clusterProfiles.length - 10} more — switch to List view to see all
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+          )}
+
+          {/* Ranking table — shown in list mode or when no clusters yet */}
+          {(viewMode === "list" || clusters.length === 0) && (
           <div className="glass-card overflow-hidden">
             <div className="grid grid-cols-[28px_1fr_auto] sm:grid-cols-[40px_80px_1fr_auto_auto] items-center gap-0 border-b border-white/5 px-3 sm:px-5 py-3 text-[10px] font-semibold uppercase tracking-wider text-white/25">
               <span>#</span>
@@ -1500,6 +1594,7 @@ function TalentView() {
               </div>
             )}
           </div>
+          )} {/* end list view */}
         </div>
       )}
 
