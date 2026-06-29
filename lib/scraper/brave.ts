@@ -47,40 +47,42 @@ export async function searchBrave(
 }
 
 /**
- * Deep search: paginates through Brave's offsets (0-9) to pull up to ~200
- * unique LinkedIn profile URLs per query instead of just the first 20.
- * This is the main multiplier for getting thousands of URLs.
+ * Fast single-page search: fetches one page of Brave results per query.
+ * We get volume by running many diverse queries, not by deep-paginating one query.
+ * Each call costs ~700ms (Brave rate limit), so 250 queries ≈ 3 minutes total.
  */
 export async function searchBraveDeep(
   query: string,
   apiKey: string,
   opts: { maxResults?: number; delayMs?: number } = {},
 ): Promise<SearchResult[]> {
-  const maxResults = opts.maxResults ?? 120;
-  const delayMs = opts.delayMs ?? 1100; // Brave free tier ≈ 1 req/sec
-  const seen = new Set<string>();
+  const delayMs = opts.delayMs ?? 700;
   const out: SearchResult[] = [];
+  const seen = new Set<string>();
 
-  // Brave allows offset 0..9 with count up to 20 → up to 200 results per query
-  for (let offset = 0; offset <= 9 && out.length < maxResults; offset++) {
-    let batch: SearchResult[] = [];
-    try {
-      batch = await searchBrave(query, apiKey, offset, 20);
-    } catch {
-      break;
-    }
-    if (batch.length === 0) break; // no more pages
-
-    for (const r of batch) {
-      const u = r.link.split("?")[0];
-      if (seen.has(u)) continue;
-      seen.add(u);
-      out.push(r);
-    }
-
-    if (batch.length < 20) break; // last page reached
-    if (offset < 9) await new Promise((r) => setTimeout(r, delayMs));
+  // Always fetch page 0
+  let batch: SearchResult[] = [];
+  try {
+    batch = await searchBrave(query, apiKey, 0, 20);
+  } catch {
+    return [];
+  }
+  for (const r of batch) {
+    const u = r.link.split("?")[0];
+    if (!seen.has(u)) { seen.add(u); out.push(r); }
   }
 
-  return out.slice(0, maxResults);
+  // Fetch page 1 only if first page was full (likely more results)
+  if (batch.length >= 18) {
+    await new Promise((r) => setTimeout(r, delayMs));
+    try {
+      const batch2 = await searchBrave(query, apiKey, 1, 20);
+      for (const r of batch2) {
+        const u = r.link.split("?")[0];
+        if (!seen.has(u)) { seen.add(u); out.push(r); }
+      }
+    } catch { /* ignore */ }
+  }
+
+  return out;
 }

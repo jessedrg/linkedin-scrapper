@@ -1,22 +1,62 @@
 /**
  * POST /api/talent
  *
- * Top-talent search: given a role + location + tier preferences, generates
- * hyper-targeted LinkedIn search queries using the Vercel AI Gateway, runs
- * them against Brave Search with deep pagination, scores every result with the
- * profile scorer, optionally re-ranks the top candidates with AI, and streams
- * SSE progress back to the client.
+ * Collect-then-filter strategy:
+ * 1. Generate many role-specific queries (role phrase in EVERY query)
+ * 2. Collect ALL results from Brave — no filtering during collection
+ * 3. Filter by role title match AFTER collection (AI synonyms + static list)
+ * 4. Score and AI re-rank the filtered set
+ * 5. Stream SSE progress + final results to client
  */
 
 import { type NextRequest } from "next/server";
 import { searchBraveDeep } from "@/lib/scraper/brave";
-import { scoreProfile, rankProfiles, extractCompanyFromResult, normaliseRole, titleMatchesRole } from "@/lib/scraper/scorer";
+import {
+  scoreProfile,
+  rankProfiles,
+  extractCompanyFromResult,
+  normaliseRole,
+  titleMatchesRole,
+} from "@/lib/scraper/scorer";
 import { getCompaniesByTier, type CompanyTier } from "@/lib/scraper/companies";
 import { db } from "@/lib/db";
 import { talentSearches, profiles } from "@/lib/db/schema";
 import { eq } from "drizzle-orm";
 
 export const maxDuration = 300;
+
+// ── helpers ───────────────────────────────────────────────────────────────────
+
+function buildPromptQueryGen(role: string, location: string, companySample: string): string {
+  const loc = location ? "\nTarget location: " + location : "";
+  return (
+    "Role to find: \"" + role + "\"" + loc +
+    "\nCompanies to use: " + companySample +
+    "\n\nGenerate 50 precise LinkedIn search queries." +
+    "\nEVERY query MUST contain the role title or close synonym as a quoted phrase." +
+    "\nVary: exact title, seniority (senior/staff/lead/principal), synonyms, company combos." +
+    "\nFormat: site:linkedin.com/in/ \"Title\" \"Company\"" +
+    "\nReturn one query per line, no numbering."
+  );
+}
+
+function buildPromptSynonyms(role: string): string {
+  return (
+    "Role: \"" + role + "\"\n\n" +
+    "Return a flat JSON array of all LinkedIn title variations for this role." +
+    " Include abbreviations, seniority prefixes, alternate phrasings, and closely related roles." +
+    " Lowercase strings only. No markdown, no explanation."
+  );
+}
+
+function buildPromptRerank(role: string, location: string, profileLines: string): string {
+  const loc = location ? "\nLocation: \"" + location + "\"" : "";
+  return (
+    "Role: \"" + role + "\"" + loc +
+    "\n\nProfiles to re-rank:\n" + profileLines +
+    "\n\nReturn JSON only. Array: [{index, rerankedScore (0-100), reason (max 15 words)}]"
+  );
+}
 
 // ── AI query generator ────────────────────────────────────────────────────────
 
@@ -37,75 +77,54 @@ async function generateTalentQueries(opts: {
     if (!seen.has(k) && k.length > 20) { seen.add(k); queries.push(q); }
   };
 
-  const loc = location ? `"${location}"` : "";
+  const locStr = location ? " \"" + location + "\"" : "";
   const seniorityPrefixes = ["", "senior ", "staff ", "principal ", "lead ", "founding "];
 
-  // ── TIER 1: Role-first queries (highest precision, fills most of the budget) ──
-  // Every query MUST contain an exact role phrase — this guarantees relevance.
+  // Tier 1: exact phrase + seniority variants, with and without company
   for (const phrase of exactPhrases) {
     for (const prefix of seniorityPrefixes) {
-      const titleQ = `"${prefix}${phrase}"`;
-      // Without company (broadest reach)
-      add(`${SITE} ${titleQ}${loc ? " " + loc : ""}`);
-      // With each top company
+      const titleQ = "\"" + prefix + phrase + "\"";
+      add(SITE + " " + titleQ + locStr);
       for (const company of companies.slice(0, 40)) {
-        add(`${SITE} "${company}" ${titleQ}${loc ? " " + loc : ""}`);
+        add(SITE + " \"" + company + "\" " + titleQ + locStr);
       }
     }
   }
 
-  // ── TIER 2: Title alias queries (good precision) ──
+  // Tier 2: alias titles
   for (const title of titles.slice(0, 4)) {
-    const titleQ = `"${title}"`;
-    add(`${SITE} ${titleQ}${loc ? " " + loc : ""}`);
+    const titleQ = "\"" + title + "\"";
+    add(SITE + " " + titleQ + locStr);
     for (const company of companies.slice(0, 20)) {
-      add(`${SITE} "${company}" ${titleQ}${loc ? " " + loc : ""}`);
+      add(SITE + " \"" + company + "\" " + titleQ + locStr);
     }
   }
 
-  // ── TIER 3: AI-generated queries (diversity boost) ──
+  // Tier 3: AI-generated queries
   try {
     const companySample = companies.slice(0, 25).join(", ");
     const res = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY ?? ""}`,
+        Authorization: "Bearer " + (process.env.AI_GATEWAY_API_KEY ?? ""),
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
-            content: `You are an expert LinkedIn talent sourcer.
-CRITICAL RULE: Every single query you generate MUST contain the exact role title or a very close synonym as a quoted phrase.
-Never generate queries that search for a company+location without the role — those return irrelevant profiles.
-Format: site:linkedin.com/in/ "RoleTitle" "Company" (optional "Location")
-Return ONLY raw queries, one per line. No numbering, no explanations.`,
+            content:
+              "You are an expert LinkedIn talent sourcer. " +
+              "EVERY query MUST contain the exact role title or a close synonym as a quoted phrase. " +
+              "Return ONLY raw queries, one per line. No numbering, no explanations.",
           },
-          {
-            role: "user",
-            content: `Role to find: "${role}"${location ? `\nTarget location: ${location}` : ""}
-Companies to use (pick the most relevant ones): ${companySample}
-
-Generate 50 precise LinkedIn search queries. Rules:
-1. EVERY query must have the role title or synonym as a quoted phrase
-2. Vary: exact title, seniority level (senior/staff/lead/principal), close synonyms
-3. Mix: some with company, some with just title+location
-4. Include niche title variants that this type of person actually uses on LinkedIn
-
-Examples of good queries:
-site:linkedin.com/in/ "Forward Deployed Engineer" "Palantir"
-site:linkedin.com/in/ "Forward Deployed Engineer" "San Francisco"
-site:linkedin.com/in/ "FDE" "Palantir" "New York"
-site:linkedin.com/in/ "Field Engineer" "Stripe" "San Francisco"`,
-          },
+          { role: "user", content: buildPromptQueryGen(role, location, companySample) },
         ],
         temperature: 0.7,
-        max_tokens: 3000,
+        max_tokens: 2000,
       }),
     });
-
     if (res.ok) {
       const data = (await res.json()) as { choices: Array<{ message: { content: string } }> };
       const text = data.choices[0]?.message?.content ?? "";
@@ -114,9 +133,7 @@ site:linkedin.com/in/ "Field Engineer" "Stripe" "San Francisco"`,
         if (q.startsWith("site:linkedin.com/in/")) add(q);
       }
     }
-  } catch {
-    // AI queries are a bonus — continue with static ones
-  }
+  } catch { /* bonus — continue with static */ }
 
   return queries.slice(0, opts.totalQueries);
 }
@@ -126,14 +143,14 @@ site:linkedin.com/in/ "Field Engineer" "Stripe" "San Francisco"`,
 async function aiRerank(opts: {
   role: string;
   location: string;
-  profiles: Array<{ title: string; company: string; linkedinUrl: string; snippet: string; score: number }>;
+  profiles: Array<{ title: string; company: string; linkedinUrl: string; score: number }>;
 }): Promise<Array<{ url: string; rerankedScore: number; reason: string }>> {
   const { role, location, profiles: candidates } = opts;
   if (candidates.length === 0) return [];
 
   const profileLines = candidates
     .slice(0, 30)
-    .map((p, i) => `${i + 1}. Title: "${p.title}" | Company: "${p.company}" | Score: ${p.score} | URL: ${p.linkedinUrl}`)
+    .map((p, i) => (i + 1) + ". Title: \"" + p.title + "\" | Company: \"" + p.company + "\" | Score: " + p.score)
     .join("\n");
 
   try {
@@ -141,33 +158,24 @@ async function aiRerank(opts: {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY ?? ""}`,
+        Authorization: "Bearer " + (process.env.AI_GATEWAY_API_KEY ?? ""),
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages: [
           {
             role: "system",
-            content: `You are an elite technical recruiter re-ranking LinkedIn profiles.
-You ONLY look for the absolute best candidates — tier-S startups, strong seniority, perfect role+location match.
-Return JSON array: [{"index": N, "rerankedScore": 0-100, "reason": "short reason"}]
-Rank purely on likely quality and fit for the role. Be opinionated and strict.`,
+            content:
+              "You are an elite technical recruiter re-ranking LinkedIn profiles. " +
+              "Rank purely on role fit, company prestige, and seniority. Be strict. " +
+              "Return JSON array: [{\"index\": N, \"rerankedScore\": 0-100, \"reason\": \"short reason\"}]",
           },
-          {
-            role: "user",
-            content: `Role: "${role}"${location ? `\nLocation: "${location}"` : ""}
-
-Profiles to re-rank:
-${profileLines}
-
-Return JSON only. Array of objects with index (1-based), rerankedScore (0-100), reason (max 15 words).`,
-          },
+          { role: "user", content: buildPromptRerank(role, location, profileLines) },
         ],
         temperature: 0.3,
-        max_tokens: 2000,
+        max_tokens: 1500,
       }),
     });
-
     if (!res.ok) return [];
     const data = (await res.json()) as { choices: Array<{ message: { content: string } }> };
     const text = data.choices[0]?.message?.content ?? "";
@@ -193,14 +201,12 @@ export async function POST(req: NextRequest) {
     location = "",
     tiers = ["S", "A", "Mega"],
     queriesTotal = 80,
-    maxResultsPerQuery = 60,
     aiRerank: wantRerank = true,
   } = body as {
     role: string;
     location?: string;
     tiers?: CompanyTier[];
     queriesTotal?: number;
-    maxResultsPerQuery?: number;
     aiRerank?: boolean;
   };
 
@@ -229,57 +235,14 @@ export async function POST(req: NextRequest) {
   const stream = new ReadableStream({
     async start(controller) {
       const send = (data: object) => {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+        controller.enqueue(encoder.encode("data: " + JSON.stringify(data) + "\n\n"));
       };
 
       try {
-        // Gather companies for the requested tiers
         const tieredCos = getCompaniesByTier(tiers as CompanyTier[]);
         const companyNames = tieredCos.map((c) => c.name);
 
-        // Step 1: Ask the AI to generate ALL possible title synonyms for this role.
-        // These are used as a hard filter — any profile whose title doesn't match
-        // at least one synonym is discarded immediately, preventing irrelevant results.
-        send({ type: "status", message: `Expanding role synonyms with AI...` });
-        let aiSynonyms: string[] = [];
-        try {
-          const synRes = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${process.env.AI_GATEWAY_API_KEY ?? ""}`,
-            },
-            body: JSON.stringify({
-              model: "gpt-4o-mini",
-              messages: [
-                {
-                  role: "system",
-                  content: `You are a LinkedIn recruiter. Given a job role, return ALL possible exact title variations that someone with that role uses on their LinkedIn profile.
-Return ONLY a JSON array of strings. No explanation. No extra text. Just the JSON array.
-Be comprehensive — include abbreviations, seniority prefixes (Senior/Staff/Lead/Principal), and slightly different phrasings people actually use on LinkedIn.`,
-                },
-                {
-                  role: "user",
-                  content: `Role: "${role}"\n\nReturn all LinkedIn title variations as a JSON string array.`,
-                },
-              ],
-              temperature: 0.3,
-              max_tokens: 500,
-            }),
-          });
-          if (synRes.ok) {
-            const synData = (await synRes.json()) as { choices: Array<{ message: { content: string } }> };
-            const raw = synData.choices[0]?.message?.content?.trim() ?? "[]";
-            // Strip markdown code fences if present
-            const clean = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "").trim();
-            const parsed = JSON.parse(clean);
-            if (Array.isArray(parsed)) aiSynonyms = parsed.map(String).filter(Boolean);
-          }
-        } catch {
-          // Continue — static synonyms from normaliseRole() will still filter
-        }
-
-        send({ type: "status", message: `Generating queries for ${companyNames.length} companies (${tiers.join("/")})...` });
+        send({ type: "status", message: "Generating queries for " + companyNames.length + " companies (" + tiers.join("/") + ")..." });
 
         const queries = await generateTalentQueries({
           role,
@@ -288,20 +251,23 @@ Be comprehensive — include abbreviations, seniority prefixes (Senior/Staff/Lea
           totalQueries: queriesTotal,
         });
 
-        send({ type: "status", message: `Running ${queries.length} targeted searches...`, queriesTotal: queries.length });
+        send({ type: "status", message: "Running " + queries.length + " searches...", queriesTotal: queries.length });
 
+        // ── Phase 1: COLLECT everything — no filtering during collection ──
+        // The queries already contain the role title as a quoted phrase, so
+        // Brave already constrains results heavily. We collect all and filter after.
         const allRaw: Array<{ title: string; company: string; linkedinUrl: string; snippet: string }> = [];
         const seenUrls = new Set<string>();
 
         for (let qi = 0; qi < queries.length; qi++) {
-          const query = queries[qi];
+          const q = queries[qi];
           send({ type: "progress", queriesDone: qi, queriesTotal: queries.length, profilesFound: allRaw.length });
 
           let results;
           try {
-            results = await searchBraveDeep(query, braveKey, { maxResults: maxResultsPerQuery, delayMs: 1100 });
+            results = await searchBraveDeep(q, braveKey, { delayMs: 700 });
           } catch {
-            await new Promise((r) => setTimeout(r, 3000));
+            await new Promise((r) => setTimeout(r, 2000));
             continue;
           }
 
@@ -309,29 +275,65 @@ Be comprehensive — include abbreviations, seniority prefixes (Senior/Staff/Lea
             const url = r.link.split("?")[0];
             if (seenUrls.has(url)) continue;
             seenUrls.add(url);
-
-            // HARD FILTER: discard any profile whose title doesn't match the role.
-            // This is the primary quality gate — eliminates irrelevant results before scoring.
-            if (!titleMatchesRole(r.title, role, aiSynonyms)) continue;
-
             const company = extractCompanyFromResult(r.title, r.snippet);
             allRaw.push({ title: r.title, company, linkedinUrl: url, snippet: r.snippet });
           }
 
-          if (allRaw.length >= 2000) break;
+          if (allRaw.length >= 5000) break;
         }
 
-        send({ type: "status", message: `Scoring ${allRaw.length} profiles...` });
+        send({ type: "status", message: "Collected " + allRaw.length + " profiles. Getting AI synonyms..." });
 
-        // Score all profiles
-        const scored = allRaw.map((p) =>
+        // ── Phase 2: AI synonym expansion (once, after collection) ──
+        let aiSynonyms: string[] = [];
+        try {
+          const synRes = await fetch("https://ai-gateway.vercel.sh/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: "Bearer " + (process.env.AI_GATEWAY_API_KEY ?? ""),
+            },
+            body: JSON.stringify({
+              model: "gpt-4o-mini",
+              messages: [
+                {
+                  role: "system",
+                  content:
+                    "You are a LinkedIn recruiter expert. " +
+                    "Return every possible LinkedIn title variation for the given role. " +
+                    "Return ONLY a flat JSON array of lowercase strings. No markdown, no explanation.",
+                },
+                { role: "user", content: buildPromptSynonyms(role) },
+              ],
+              temperature: 0.2,
+              max_tokens: 600,
+            }),
+          });
+          if (synRes.ok) {
+            const synData = (await synRes.json()) as { choices: Array<{ message: { content: string } }> };
+            const raw = synData.choices[0]?.message?.content?.trim() ?? "[]";
+            const clean = raw.replace(/^```json\s*/i, "").replace(/^```\s*/i, "").replace(/```$/, "").trim();
+            const parsed = JSON.parse(clean);
+            if (Array.isArray(parsed)) {
+              aiSynonyms = parsed.map((s: unknown) => String(s).toLowerCase()).filter(Boolean);
+            }
+          }
+        } catch { /* use static synonyms */ }
+
+        // ── Phase 3: FILTER by role title ──
+        const filtered = allRaw.filter((p) => titleMatchesRole(p.title, role, aiSynonyms));
+
+        send({ type: "status", message: filtered.length + " role-matched profiles. Scoring..." });
+
+        // ── Phase 4: SCORE ──
+        const scored = filtered.map((p) =>
           scoreProfile(p, { role, location, preferredTiers: tiers as CompanyTier[] }),
         );
         let ranked = rankProfiles(scored);
 
-        send({ type: "status", message: `AI re-ranking top ${Math.min(ranked.length, 30)} profiles...` });
+        send({ type: "status", message: "AI re-ranking top " + Math.min(ranked.length, 30) + " profiles..." });
 
-        // AI re-rank top 30
+        // ── Phase 5: AI re-rank top 30 ──
         if (wantRerank && ranked.length > 0) {
           const reranked = await aiRerank({ role, location, profiles: ranked.slice(0, 30) });
           if (reranked.length > 0) {
@@ -342,14 +344,14 @@ Be comprehensive — include abbreviations, seniority prefixes (Senior/Staff/Lea
               return {
                 ...p,
                 score: Math.round((p.score * 0.4) + (ai.rerankedScore * 0.6)),
-                matchReasons: [...p.matchReasons, `AI: ${ai.reason}`],
+                matchReasons: [...p.matchReasons, "AI: " + ai.reason],
               };
             });
             ranked.sort((a, b) => b.score - a.score);
           }
         }
 
-        // Persist top 500 to profiles table
+        // ── Phase 6: PERSIST top 500 ──
         const toSave = ranked.slice(0, 500);
         for (const p of toSave) {
           try {
@@ -367,21 +369,16 @@ Be comprehensive — include abbreviations, seniority prefixes (Senior/Staff/Lea
               location: p.location,
               matchReason: p.matchReasons.join(" | "),
             }).onConflictDoNothing();
-          } catch { /* ignore dupe constraint */ }
+          } catch { /* ignore dupe */ }
         }
 
-        // Update talent search status
         await db
           .update(talentSearches)
           .set({ status: "completed", profilesFound: ranked.length, finishedAt: new Date() })
           .where(eq(talentSearches.id, tsId));
 
-        send({
-          type: "done",
-          searchId: tsId,
-          total: ranked.length,
-          profiles: ranked.slice(0, 200),
-        });
+        send({ type: "done", searchId: tsId, total: ranked.length, profiles: ranked.slice(0, 200) });
+
       } catch (err) {
         await db
           .update(talentSearches)
