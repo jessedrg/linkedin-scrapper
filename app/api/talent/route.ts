@@ -88,22 +88,47 @@ async function generateTalentQueries(opts: {
 
   const seniorityPrefixes = ["", "Senior ", "Staff ", "Lead ", "Principal "];
 
-  // IMPORTANT: queries are emitted in order of PRODUCTIVITY (most results first),
-  // because the final list is capped with slice(0, totalQueries). Location is NEVER
-  // quoted inside the query — Brave requires the exact string to appear verbatim,
-  // which almost no LinkedIn snippet contains, returning ~0 results. Location is
-  // applied later by the scorer instead.
+  // Build UNQUOTED location terms. Unlike a quoted "San Francisco" (which Brave
+  // requires verbatim and almost no snippet contains), unquoted terms are treated
+  // as soft relevance signals: Brave biases toward that geography but still returns
+  // people who list "Bay Area", "SF", etc. We append several metro phrasings.
+  const locationTerms: string[] = [];
+  if (location) {
+    const loc = location.toLowerCase();
+    locationTerms.push(location);
+    if (loc.includes("san francisco") || loc.includes("sf") || loc.includes("bay area")) {
+      locationTerms.push("Bay Area", "Silicon Valley");
+    } else if (loc.includes("new york") || loc.includes("nyc")) {
+      locationTerms.push("New York", "NYC");
+    } else if (loc.includes("london")) {
+      locationTerms.push("London", "United Kingdom");
+    } else if (loc.includes("los angeles") || loc.includes("la")) {
+      locationTerms.push("Los Angeles", "LA");
+    }
+  }
 
-  // ── PRIMARY: Title only (no company, no location) — highest yield ───────────
-  // Each of these returns the broadest set of matching profiles globally.
+  // IMPORTANT: queries are emitted in order of PRODUCTIVITY (most results first),
+  // because the final list is capped with slice(0, totalQueries).
+
+  // ── PRIMARY: Title + UNQUOTED location — geo-biased, still high yield ────────
+  // Brave ranks local profiles first but does NOT require exact location text,
+  // so we keep volume while strongly favoring the requested area.
+  if (locationTerms.length > 0) {
+    for (const variant of allVariants) {
+      for (const prefix of seniorityPrefixes) {
+        add(SITE + " \"" + prefix + variant + "\" " + locationTerms.join(" "), "role");
+      }
+    }
+  }
+
+  // ── SECONDARY: Title only (no location) — global reach, catches everyone ────
   for (const variant of allVariants) {
     for (const prefix of seniorityPrefixes) {
       add(SITE + " \"" + prefix + variant + "\"", "role");
     }
   }
 
-  // ── SECONDARY: Title × company — one query per variant per company ───────────
-  // Brave pre-filters by role; the scorer applies location + company-quality bonuses.
+  // ── TERTIARY: Title × company — Brave pre-filters by role + company ──────────
   for (const variant of allVariants) {
     for (const company of companies) {
       add(SITE + " \"" + company + "\" \"" + variant + "\"", "company");
