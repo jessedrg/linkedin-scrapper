@@ -54,10 +54,10 @@ export interface PDLSearchOpts {
 }
 
 /**
- * Build an Elasticsearch SQL query for PDL.
- * PDL SQL supports: SELECT ... FROM person WHERE ... LIMIT n
+ * Build a PDL SQL query. NOTE: LIMIT is NOT supported in PDL SQL —
+ * use the `size` request parameter instead.
  */
-function buildPDLSQL(opts: PDLSearchOpts, from: number): string {
+function buildPDLSQL(opts: PDLSearchOpts): string {
   const parts: string[] = [];
 
   // Title filter — OR across all variants
@@ -124,7 +124,7 @@ function buildPDLSQL(opts: PDLSearchOpts, from: number): string {
 
   const where = parts.length > 0 ? `WHERE ${parts.join(" AND ")}` : "";
 
-  return `SELECT * FROM person ${where} LIMIT ${opts.size ?? 100}`;
+  return `SELECT * FROM person ${where}`;
 }
 
 /**
@@ -133,14 +133,13 @@ function buildPDLSQL(opts: PDLSearchOpts, from: number): string {
 export async function searchPDL(
   apiKey: string,
   opts: PDLSearchOpts,
-  from = 0,
 ): Promise<{ profiles: PDLProfile[]; total: number; scrollToken?: string }> {
-  const sql = buildPDLSQL(opts, from);
+  const sql = buildPDLSQL(opts);
 
+  // `from` is no longer supported by PDL — pagination uses scroll_token only.
   const body: Record<string, unknown> = {
     sql,
     size: Math.min(opts.size ?? 100, 100),
-    from,
     pretty: false,
   };
 
@@ -194,12 +193,12 @@ export async function searchPDLDeep(
   const pageSize = 100;
   const out: PDLProfile[] = [];
   const seen = new Set<string>();
-  let from = 0;
+  let scrollToken: string | undefined = undefined;
 
   while (out.length < maxRecords) {
     let page: { profiles: PDLProfile[]; total: number; scrollToken?: string };
     try {
-      page = await searchPDL(apiKey, { ...opts, size: pageSize }, from);
+      page = await searchPDL(apiKey, { ...opts, size: pageSize, scrollToken });
     } catch (err) {
       // Surface credit/auth errors immediately
       if (String(err).includes("402") || String(err).includes("401")) throw err;
@@ -216,11 +215,13 @@ export async function searchPDLDeep(
       }
     }
 
-    // PDL `from` offset max is 10,000
-    from += page.profiles.length;
-    if (from >= Math.min(page.total, 10_000)) break;
+    // If PDL returns a scroll_token, use it for the next page; otherwise we're done.
+    if (!page.scrollToken) break;
+    scrollToken = page.scrollToken;
 
-    // Small delay to be respectful
+    // Stop if we've fetched everything available
+    if (out.length >= page.total) break;
+
     await new Promise((r) => setTimeout(r, 150));
   }
 

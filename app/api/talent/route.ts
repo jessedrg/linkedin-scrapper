@@ -441,18 +441,21 @@ export async function POST(req: NextRequest) {
 
         const pdlKey = process.env.PDL_API_KEY;
 
+        // Track whether we need to fall through to SERP
+        let runSERP = !pdlKey || !hasPDL();
+
         if (pdlKey && hasPDL()) {
           // ── PDL PATH: native structured search — no scraping, no SERP ────────
-          // PDL returns structured profiles directly filtered by title + location.
-          // This is far more accurate than SERP since PDL has 3B+ professional records.
           send({ type: "status", message: "Searching People Data Labs database..." });
           send({ type: "progress", queriesDone: 0, queriesTotal: 3, profilesFound: 0 });
 
-          // Run 3 PDL searches: with location+title, title-only global, with top companies
+          // Keep max 5 specific variants — avoid generic terms like "Software Engineer"
+          const specificVariants = [role, ...aiSynonyms.slice(0, 4)];
+
           const pdlSearches = [
-            { titleVariants: [role, ...aiSynonyms.slice(0, 10)], location, companies: undefined },
-            { titleVariants: [role, ...aiSynonyms.slice(0, 10)], location: undefined, companies: undefined },
-            { titleVariants: [role, ...aiSynonyms.slice(0, 10)], location, companies: companyNames.slice(0, 20) },
+            { titleVariants: specificVariants, location, companies: undefined },
+            { titleVariants: specificVariants, location: undefined, companies: undefined },
+            { titleVariants: specificVariants, location, companies: companyNames.slice(0, 20) },
           ];
 
           for (let si = 0; si < pdlSearches.length; si++) {
@@ -472,6 +475,7 @@ export async function POST(req: NextRequest) {
               const msg = String(err);
               if (msg.includes("402")) {
                 send({ type: "status", message: "PDL: out of credits. Falling back to web search..." });
+                runSERP = true; // trigger SERP fallback
                 break;
               }
               if (msg.includes("401")) {
@@ -479,12 +483,13 @@ export async function POST(req: NextRequest) {
                 controller.close();
                 return;
               }
-              // Other errors — continue with next search
+              // Other errors — continue with next PDL search
             }
           }
+        }
 
-        } else {
-          // ── SERP PATH: Google/Brave scraping ────────────────────────────────
+        if (runSERP) {
+          // ── SERP PATH: Google/Brave scraping (primary or PDL fallback) ───────
           send({ type: "status", message: "Generating queries for " + companyNames.length + " companies..." });
           const queryList = await generateTalentQueries({
             role,
