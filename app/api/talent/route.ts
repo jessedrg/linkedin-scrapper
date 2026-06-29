@@ -10,7 +10,7 @@
  */
 
 import { type NextRequest } from "next/server";
-import { searchBraveDeep } from "@/lib/scraper/brave";
+import { searchDeep, getSearchProvider } from "@/lib/scraper/search";
 import {
   scoreProfile,
   rankProfiles,
@@ -274,9 +274,9 @@ export async function POST(req: NextRequest) {
     return new Response(JSON.stringify({ error: "role is required" }), { status: 400 });
   }
 
-  const braveKey = process.env.BRAVE_API_KEY ?? "";
-  if (!braveKey) {
-    return new Response(JSON.stringify({ error: "BRAVE_API_KEY not set" }), { status: 500 });
+  const provider = getSearchProvider();
+  if (!provider) {
+    return new Response(JSON.stringify({ error: "No search provider set (add SERPER_API_KEY or BRAVE_API_KEY)" }), { status: 500 });
   }
 
   // Create talent_search record
@@ -366,12 +366,11 @@ export async function POST(req: NextRequest) {
 
           let results;
           try {
-            // Role+company queries: 2 pages (up to 40 results, all role-relevant)
-            // Role-only queries: 2 pages (global sweep)
-            // Both types now have the role in the query so results are pre-filtered by Brave.
-            results = await searchBraveDeep(q, braveKey, {
+            // Provider-agnostic: Serper (Google, 100/page) when SERPER_API_KEY is set,
+            // otherwise Brave (20/page). Each query has the role pre-filtered by the engine.
+            results = await searchDeep(q, {
               maxPages: 2,
-              delayMs: 700,
+              delayMs: provider === "serper" ? 300 : 700,
             });
           } catch {
             await new Promise((r) => setTimeout(r, 2000));
